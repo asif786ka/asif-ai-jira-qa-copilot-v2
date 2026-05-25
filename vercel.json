@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "pnpm install --frozen-lockfile=false && pnpm build",
+  "outputDirectory": "apps/web/.next",
+  "framework": "nextjs",
+  "rewrites": [
+    { "source": "/pyapi/:path*", "destination": "/api/python" }
+  ],
+  "functions": {
+    "api/python.py": {
+      "runtime": "@vercel/python@4.3.1",
+      "maxDuration": 60
+    },
+    "apps/web/src/app/api/generate/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}

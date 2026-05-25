@@ -1,0 +1,22 @@
+{
+  "name": "asif-ai-jira-qa-copilot-v2",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI Jira QA Copilot v2 — Connect Jira + GitHub, generate Android/iOS/Web test cases with swappable LLM providers",
+  "scripts": {
+    "dev": "pnpm --filter @jiraqa/web dev",
+    "build": "pnpm --filter @jiraqa/core build && pnpm --filter @jiraqa/providers build && pnpm --filter @jiraqa/web build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "py:dev": "cd apps/api-python && uvicorn api.main:app --reload --port 5001",
+    "py:install": "cd apps/api-python && pip install -r requirements.txt --break-system-packages"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  }
+}

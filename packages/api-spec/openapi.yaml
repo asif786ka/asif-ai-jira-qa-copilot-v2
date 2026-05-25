@@ -1,0 +1,188 @@
+openapi: 3.1.0
+info:
+  title: AI Jira QA Copilot API
+  description: |
+    Single-source-of-truth API spec for the AI Jira QA Copilot.
+    Both the TypeScript (Next.js) backend and the Python (FastAPI) sidecar
+    implement the same endpoints — this spec is the contract they share.
+  version: 0.1.0
+
+servers:
+  - url: /api
+    description: TypeScript backend (Next.js on Vercel)
+  - url: /pyapi
+    description: Python sidecar (FastAPI on Vercel)
+
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  backend: { type: string, enum: [typescript, python] }
+                  llm:
+                    type: object
+                    properties:
+                      available: { type: boolean }
+                      default_provider: { type: string, nullable: true }
+                      registered:
+                        type: array
+                        items: { type: string }
+
+  /generate:
+    post:
+      summary: Generate platform-aware QA test cases from a Jira ticket.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateRequest"
+      responses:
+        "200":
+          description: Generated test cases
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerateResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    Platform:
+      type: string
+      enum: [android, ios, web]
+
+    Priority:
+      type: string
+      enum: [low, medium, high, critical]
+
+    IssueType:
+      type: string
+      enum: [story, bug, task, epic, subtask]
+
+    JiraTicket:
+      type: object
+      required: [ticket_id, summary]
+      properties:
+        ticket_id: { type: string }
+        summary: { type: string }
+        description: { type: string }
+        acceptance_criteria:
+          type: array
+          items: { type: string }
+        issue_type: { $ref: "#/components/schemas/IssueType" }
+        priority: { $ref: "#/components/schemas/Priority" }
+        component: { type: string }
+        labels:
+          type: array
+          items: { type: string }
+        environment: { type: string }
+
+    RepoContext:
+      type: object
+      required: [owner, repo]
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        default_branch: { type: string }
+        detected_platforms:
+          type: array
+          items: { $ref: "#/components/schemas/Platform" }
+        language_breakdown:
+          type: object
+          additionalProperties: { type: integer }
+        readme_excerpt: { type: string }
+        file_tree_sample:
+          type: array
+          items: { type: string }
+        key_files:
+          type: array
+          items:
+            type: object
+            properties:
+              path: { type: string }
+              excerpt: { type: string }
+
+    TestCase:
+      type: object
+      required: [test_case_id, test_scenario, platform, expected_result]
+      properties:
+        test_case_id: { type: string }
+        test_scenario: { type: string }
+        platform: { $ref: "#/components/schemas/Platform" }
+        preconditions:
+          type: array
+          items: { type: string }
+        test_steps:
+          type: array
+          items: { type: string }
+        test_data:
+          type: array
+          items: { type: string }
+        expected_result: { type: string }
+        priority:
+          oneOf:
+            - { $ref: "#/components/schemas/Priority" }
+            - { type: "null" }
+        automation_candidate: { type: boolean }
+        automation_framework_hint: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+
+    GenerateRequest:
+      type: object
+      required: [ticket, platform]
+      properties:
+        ticket: { $ref: "#/components/schemas/JiraTicket" }
+        platform: { $ref: "#/components/schemas/Platform" }
+        repo_context: { $ref: "#/components/schemas/RepoContext" }
+        provider:
+          type: string
+          enum: [openai, gemini]
+        count_hint:
+          type: integer
+          minimum: 3
+          maximum: 8
+
+    GenerateResponse:
+      type: object
+      required: [ticket_id, summary, platform, provider, backend, generated_test_cases]
+      properties:
+        ticket_id: { type: string }
+        summary: { type: string }
+        platform: { $ref: "#/components/schemas/Platform" }
+        provider: { type: string }
+        backend: { type: string, enum: [typescript, python] }
+        generated_test_cases:
+          type: array
+          minItems: 3
+          maxItems: 8
+          items: { $ref: "#/components/schemas/TestCase" }
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        details: { type: string }
+        code: { type: string }
