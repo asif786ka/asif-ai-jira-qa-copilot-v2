@@ -35,12 +35,25 @@ export class OpenAIProvider implements LLMProvider {
       );
     }
 
+    // Build user-message content. If images are attached we send a content
+    // array with mixed text + image_url parts; otherwise a plain string.
+    const userContent =
+      req.images && req.images.length > 0
+        ? [
+            { type: "text", text: req.userPrompt },
+            ...req.images.map((img) => ({
+              type: "image_url",
+              image_url: { url: img.dataUrl },
+            })),
+          ]
+        : req.userPrompt;
+
     const body: Record<string, unknown> = {
       model: this.defaultModel,
       temperature: req.temperature ?? 0.3,
       messages: [
         { role: "system", content: req.systemPrompt },
-        { role: "user", content: req.userPrompt },
+        { role: "user", content: userContent },
       ],
     };
     if (req.jsonMode) body.response_format = { type: "json_object" };

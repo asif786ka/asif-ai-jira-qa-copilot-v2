@@ -4,6 +4,17 @@
  * interface and registering it in src/llm/registry.ts — nothing else changes.
  */
 
+/**
+ * An image attached to a multimodal request. Always passed as a data URL
+ * (e.g. "data:image/png;base64,iVBORw0K...") so the same shape works for
+ * every provider — they each format it differently internally.
+ */
+export interface LLMImageInput {
+  dataUrl: string; // "data:image/png;base64,..."
+  /** Optional label shown to the model (e.g. "screenshot 1: login screen"). */
+  label?: string;
+}
+
 export interface LLMCompletionRequest {
   systemPrompt: string;
   userPrompt: string;
@@ -13,6 +24,21 @@ export interface LLMCompletionRequest {
   jsonMode?: boolean;
   /** Hard upper bound on output tokens. */
   maxTokens?: number;
+  /** Optional images for multimodal/vision requests. */
+  images?: LLMImageInput[];
+}
+
+/**
+ * Helper used by provider implementations to parse a data URL into the
+ * raw base64 payload + media type that vendor APIs expect.
+ * Returns null if the input isn't a valid data URL.
+ */
+export function parseDataUrl(
+  dataUrl: string,
+): { mediaType: string; base64: string } | null {
+  const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!m || !m[1] || !m[2]) return null;
+  return { mediaType: m[1], base64: m[2] };
 }
 
 export interface LLMCompletionResponse {

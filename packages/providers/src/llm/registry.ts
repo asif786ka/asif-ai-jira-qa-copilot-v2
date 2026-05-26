@@ -13,6 +13,7 @@
  *   3. First registered provider that reports isAvailable() === true.
  */
 
+import { AnthropicProvider } from "./anthropic";
 import { GeminiProvider } from "./gemini";
 import { OpenAIProvider } from "./openai";
 import type { LLMProvider } from "./types";
@@ -53,8 +54,39 @@ export function resolveLLMProvider(explicit?: string): LLMProvider {
   );
 }
 
+/**
+ * Phase 12 — resolve a vision-capable provider when screenshots are present.
+ * All three default providers (openai, gemini, anthropic) support vision,
+ * but quality differs: Anthropic Sonnet ≥ GPT-4o > Gemini 2.5 Flash for
+ * reading UI screenshots and reasoning about element identifiers.
+ *
+ * Order: explicit override → Anthropic → OpenAI → Gemini → first available.
+ */
+export function resolveVisionProvider(explicit?: string): LLMProvider {
+  if (explicit && registry.has(explicit)) {
+    const p = getLLMProvider(explicit);
+    if (p.isAvailable()) return p;
+  }
+  const preferred = ["anthropic", "openai", "gemini"];
+  for (const name of preferred) {
+    if (registry.has(name)) {
+      const p = getLLMProvider(name);
+      if (p.isAvailable()) return p;
+    }
+  }
+  // Fall through to any available provider — they all support vision.
+  for (const name of registry.keys()) {
+    const p = getLLMProvider(name);
+    if (p.isAvailable()) return p;
+  }
+  throw new Error(
+    "No vision-capable LLM provider is available. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.",
+  );
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Default registrations
 // ────────────────────────────────────────────────────────────────────────────
 registerLLMProvider("openai", () => new OpenAIProvider());
 registerLLMProvider("gemini", () => new GeminiProvider());
+registerLLMProvider("anthropic", () => new AnthropicProvider());

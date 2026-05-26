@@ -8,10 +8,11 @@
  */
 
 import { stripFences } from "@jiraqa/core";
-import type {
-  LLMCompletionRequest,
-  LLMCompletionResponse,
-  LLMProvider,
+import {
+  parseDataUrl,
+  type LLMCompletionRequest,
+  type LLMCompletionResponse,
+  type LLMProvider,
 } from "./types";
 
 function endpoint(model: string, apiKey: string): string {
@@ -41,9 +42,26 @@ export class GeminiProvider implements LLMProvider {
       );
     }
 
+    // Gemini takes a parts array — each image becomes an inlineData part.
+    const userParts: Array<Record<string, unknown>> = [
+      { text: req.userPrompt },
+    ];
+    if (req.images && req.images.length > 0) {
+      for (const img of req.images) {
+        const parsed = parseDataUrl(img.dataUrl);
+        if (!parsed) continue;
+        userParts.push({
+          inlineData: {
+            mimeType: parsed.mediaType,
+            data: parsed.base64,
+          },
+        });
+      }
+    }
+
     const body: Record<string, unknown> = {
       systemInstruction: { parts: [{ text: req.systemPrompt }] },
-      contents: [{ role: "user", parts: [{ text: req.userPrompt }] }],
+      contents: [{ role: "user", parts: userParts }],
       generationConfig: {
         temperature: req.temperature ?? 0.3,
         ...(req.jsonMode ? { responseMimeType: "application/json" } : {}),

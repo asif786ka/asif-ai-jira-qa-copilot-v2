@@ -15,7 +15,7 @@ import {
   buildSystemPrompt,
   buildUserPrompt,
 } from "@jiraqa/core";
-import { resolveLLMProvider } from "@jiraqa/providers";
+import { resolveLLMProvider, resolveVisionProvider } from "@jiraqa/providers";
 import { errorResponse, jsonResponse } from "@/lib/utils";
 import { getSession } from "@/lib/session";
 
@@ -28,20 +28,29 @@ export async function POST(req: Request) {
   if (!parsed.success) {
     return errorResponse("Invalid request body", 400, parsed.error.message);
   }
-  const { ticket, platform, repo_context, provider, count_hint } = parsed.data;
+  const { ticket, platform, repo_context, provider, count_hint, screenshots } =
+    parsed.data;
 
-  // 2. Resolve provider — request param > session preference > env default
+  // 2. Resolve provider. If screenshots are attached, route to a vision-capable
+  //    provider (Anthropic > OpenAI > Gemini). Otherwise use the standard
+  //    resolution path: request param > session preference > env default.
   const session = await getSession();
   const providerName = provider ?? session.preferred_provider;
+  const hasScreenshots = Boolean(screenshots && screenshots.length > 0);
   let llm;
   try {
-    llm = resolveLLMProvider(providerName);
+    llm = hasScreenshots
+      ? resolveVisionProvider(providerName)
+      : resolveLLMProvider(providerName);
   } catch (e) {
     return errorResponse((e as Error).message, 500);
   }
 
-  // 3. Build prompts
-  const systemPrompt = buildSystemPrompt(platform, count_hint);
+  // 3. Build prompts. When screenshots are present, append a one-line nudge
+  //    so the model knows to integrate them rather than pretend they don't exist.
+  const systemPrompt = hasScreenshots
+    ? `${buildSystemPrompt(platform, count_hint)}\n\nIMPORTANT: The user has attached one or more UI screenshots. Use them to ground element names, screen labels, and selector identifiers — do NOT invent identifiers that aren't visible in the screenshots or described in text.`
+    : buildSystemPrompt(platform, count_hint);
   const userPrompt = buildUserPrompt(ticket, platform, repo_context);
 
   // 4. Call LLM
@@ -52,6 +61,7 @@ export async function POST(req: Request) {
       userPrompt,
       temperature: 0.3,
       jsonMode: true,
+      images: screenshots?.map((s) => ({ dataUrl: s.data_url, label: s.label })),
     });
     raw = completion.text;
   } catch (e) {

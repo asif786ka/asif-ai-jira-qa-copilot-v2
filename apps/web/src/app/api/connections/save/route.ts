@@ -24,7 +24,7 @@ const Body = z.object({
       pat: z.string().min(1),
     })
     .optional(),
-  preferred_provider: z.enum(["openai", "gemini"]).optional(),
+  preferred_provider: z.enum(["openai", "gemini", "anthropic"]).optional(),
   preferred_backend: z.enum(["typescript", "python"]).optional(),
 });
 

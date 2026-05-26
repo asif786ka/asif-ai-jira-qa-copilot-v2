@@ -1,10 +1,32 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { JiraTicket, Platform, RepoContext, TestCase } from "@jiraqa/core";
-import { Loader2, Smartphone, Apple, Globe, AlertTriangle } from "lucide-react";
+import type {
+  JiraTicket,
+  Platform,
+  RepoContext,
+  RepoConventions,
+  Screenshot,
+  TestCase,
+} from "@jiraqa/core";
+import {
+  Loader2,
+  Smartphone,
+  Apple,
+  Globe,
+  AlertTriangle,
+  Settings2,
+  FileText,
+  Sparkles,
+} from "lucide-react";
 import { TestCaseCard } from "./TestCaseCard";
 import { getActiveBackend } from "./BackendSwitcher";
+import { ConventionsWizard } from "./ConventionsWizard";
+import {
+  CustomScenarioForm,
+  type CustomScenarioOutput,
+} from "./CustomScenarioForm";
+import { SavedTestsPanel } from "./SavedTestsPanel";
 
 type SessionView = {
   jira: { site_url: string; email: string; connected: true } | null;
@@ -37,6 +59,36 @@ export function Wizard() {
   const [error, setError] = useState<string | null>(null);
   const [providerUsed, setProviderUsed] = useState<string>("");
   const [backendUsed, setBackendUsed] = useState<string>("");
+
+  // Phase 11 — per-repo conventions
+  const [conventions, setConventions] = useState<RepoConventions | null>(null);
+  const [conventionsWizardOpen, setConventionsWizardOpen] = useState(false);
+
+  // Phase 12 — source toggle: Jira ticket vs custom scenario
+  const [source, setSource] = useState<"jira" | "custom">("jira");
+  const [customOutput, setCustomOutput] = useState<CustomScenarioOutput | null>(
+    null,
+  );
+  // When custom is active, override ticket + platform + screenshots from the form.
+  const activeTicket: JiraTicket | null =
+    source === "custom" ? customOutput?.ticket ?? null : ticket;
+  const activePlatform: Platform =
+    source === "custom" ? customOutput?.platform ?? platform : platform;
+  const activeScreenshots: Screenshot[] | undefined =
+    source === "custom" ? customOutput?.screenshots : undefined;
+
+  // Phase 11.7 — E2E PR flow state
+  const [creatingPr, setCreatingPr] = useState(false);
+  const [prResult, setPrResult] = useState<{
+    pr_url: string;
+    e2e_repo: string;
+    branch: string;
+    files_committed: number;
+    created_new_repo: boolean;
+    pr_already_existed?: boolean;
+    provider_used: string;
+  } | null>(null);
+  const [prError, setPrError] = useState<string | null>(null);
 
   // ── Load session ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -118,9 +170,33 @@ export function Wizard() {
       .catch(() => {});
   }, [repoFullName]);
 
+  // ── Load saved E2E conventions when repo or platform changes ────────────
+  useEffect(() => {
+    if (!repoFullName) {
+      setConventions(null);
+      return;
+    }
+    const [owner, repo] = repoFullName.split("/");
+    if (!owner || !repo) return;
+    fetch(
+      `/api/conventions?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`,
+    )
+      .then((r) => r.json())
+      .then((d) => {
+        const c: RepoConventions | null = d.conventions;
+        // Only count conventions valid for the currently-picked platform.
+        if (c && c.platform === platform) {
+          setConventions(c);
+        } else {
+          setConventions(null);
+        }
+      })
+      .catch(() => setConventions(null));
+  }, [repoFullName, platform]);
+
   // ── Generate ────────────────────────────────────────────────────────────
   async function generate() {
-    if (!ticket) return;
+    if (!activeTicket) return;
     setGenerating(true);
     setError(null);
     setResults(null);
@@ -133,10 +209,11 @@ export function Wizard() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          ticket,
-          platform,
+          ticket: activeTicket,
+          platform: activePlatform,
           repo_context: repoContext ?? undefined,
           count_hint: 5,
+          screenshots: activeScreenshots,
         }),
       });
       const data = await res.json();
@@ -148,6 +225,58 @@ export function Wizard() {
       setError((e as Error).message);
     } finally {
       setGenerating(false);
+    }
+  }
+
+  // ── Phase 11.7 — Create the E2E PR ──────────────────────────────────────
+  async function createE2EPr() {
+    if (!ticket || !results || !repoFullName) return;
+    const [owner, repo] = repoFullName.split("/");
+    if (!owner || !repo) return;
+    setCreatingPr(true);
+    setPrError(null);
+    setPrResult(null);
+    try {
+      const res = await fetch("/api/e2e/generate-pr", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ticket,
+          test_cases: results,
+          main_owner: owner,
+          main_repo: repo,
+        }),
+      });
+      // Read body as text first — handles empty-body crash responses cleanly.
+      const text = await res.text();
+      let data: { error?: string; details?: string } & Record<string, unknown> = {};
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          throw new Error(
+            `Server returned non-JSON response (HTTP ${res.status}). First 300 chars: ${text.slice(0, 300)}`,
+          );
+        }
+      }
+      if (!res.ok) {
+        const detail = data.details ? `\n\n${data.details}` : "";
+        throw new Error(`${data.error ?? `HTTP ${res.status}`}${detail}`);
+      }
+      setPrResult(
+        data as {
+          pr_url: string;
+          e2e_repo: string;
+          branch: string;
+          files_committed: number;
+          created_new_repo: boolean;
+          provider_used: string;
+        },
+      );
+    } catch (e) {
+      setPrError((e as Error).message);
+    } finally {
+      setCreatingPr(false);
     }
   }
 
@@ -177,9 +306,41 @@ export function Wizard() {
 
   return (
     <section className="grid lg:grid-cols-12 gap-5">
-      {/* Left: Jira ticket picker */}
+      {/* Source toggle — full width above all three columns */}
+      <div className="lg:col-span-12">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-gray-400">Test source:</span>
+          <button
+            onClick={() => setSource("jira")}
+            className={`text-xs px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+              source === "jira"
+                ? "border-accent bg-accent/10 text-accent"
+                : "border-border bg-bg-panel hover:bg-white/5 text-gray-300"
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5" /> Jira ticket
+          </button>
+          <button
+            onClick={() => setSource("custom")}
+            className={`text-xs px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+              source === "custom"
+                ? "border-accent bg-accent/10 text-accent"
+                : "border-border bg-bg-panel hover:bg-white/5 text-gray-300"
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5" /> Custom scenario
+          </button>
+        </div>
+      </div>
+
+      {/* Left: Jira ticket picker OR custom scenario form */}
       <div className="lg:col-span-4 space-y-3">
-        <h2 className="text-sm font-semibold text-gray-300">1. Jira ticket</h2>
+        <h2 className="text-sm font-semibold text-gray-300">
+          1. {source === "jira" ? "Jira ticket" : "Custom scenario"}
+        </h2>
+        {source === "custom" ? (
+          <CustomScenarioForm onChange={setCustomOutput} />
+        ) : (
         <div className="card space-y-3">
           <div>
             <label className="text-xs text-gray-400">Project</label>
@@ -232,6 +393,7 @@ export function Wizard() {
             </div>
           )}
         </div>
+        )}
       </div>
 
       {/* Middle: GitHub repo + platform */}
@@ -281,8 +443,51 @@ export function Wizard() {
               <PlatformPick value="web" current={platform} onPick={setPlatform} icon={<Globe className="w-4 h-4" />} />
             </div>
           </div>
+
+          {/* Phase 11: E2E conventions status / configure */}
+          {repoFullName && (platform === "ios" || platform === "android") && (
+            <div className="border-t border-border pt-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs">
+                  <div className="text-gray-400 mb-0.5">E2E test conventions</div>
+                  {conventions ? (
+                    <div className="text-gray-300">
+                      <span className="pill bg-accent/10 border-accent/40 text-accent">
+                        {conventions.test_format}
+                      </span>{" "}
+                      <span className="pill">{conventions.ci_platform}</span>{" "}
+                      <span className="pill">{conventions.execution_backend}</span>
+                    </div>
+                  ) : (
+                    <div className="text-gray-500 italic">not configured</div>
+                  )}
+                </div>
+                <button
+                  onClick={() => setConventionsWizardOpen(true)}
+                  className="btn-ghost text-xs"
+                >
+                  <Settings2 className="w-3.5 h-3.5" />
+                  {conventions ? "Edit" : "Configure"}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
+
+      {/* Conventions wizard modal */}
+      {conventionsWizardOpen && repoFullName && (
+        <ConventionsWizard
+          owner={repoFullName.split("/")[0] ?? ""}
+          repo={repoFullName.split("/")[1] ?? ""}
+          platform={platform}
+          onSaved={(c) => {
+            setConventions(c);
+            setConventionsWizardOpen(false);
+          }}
+          onClose={() => setConventionsWizardOpen(false)}
+        />
+      )}
 
       {/* Right: Generate */}
       <div className="lg:col-span-4 space-y-3">
@@ -291,7 +496,7 @@ export function Wizard() {
           <button
             className="btn-primary w-full"
             onClick={generate}
-            disabled={!ticket || generating}
+            disabled={!activeTicket || generating}
           >
             {generating ? (
               <>
@@ -318,13 +523,75 @@ export function Wizard() {
       {/* Results */}
       {results && results.length > 0 && (
         <div className="lg:col-span-12 space-y-3">
-          <h2 className="text-sm font-semibold text-gray-300">Generated test cases ({results.length})</h2>
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <h2 className="text-sm font-semibold text-gray-300">
+              Generated test cases ({results.length})
+            </h2>
+            {/* Phase 11.7 — E2E PR button */}
+            {conventions && (platform === "ios" || platform === "android") && (
+              <button
+                onClick={createE2EPr}
+                disabled={creatingPr}
+                className="btn-primary text-xs"
+              >
+                {creatingPr ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Creating PR…
+                  </>
+                ) : (
+                  <>Generate E2E PR in {conventions.e2e_repo_name ?? "new repo"}</>
+                )}
+              </button>
+            )}
+          </div>
+
+          {prError && (
+            <div className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded p-3 whitespace-pre-line">
+              {prError}
+            </div>
+          )}
+          {prResult && (
+            <div className="text-xs border border-emerald-500/30 bg-emerald-500/10 rounded p-3 space-y-1">
+              <div className="text-emerald-300 font-medium">
+                ✓{" "}
+                {prResult.pr_already_existed
+                  ? `PR updated with new commits`
+                  : `PR opened`}{" "}
+                in {prResult.e2e_repo}
+                {prResult.created_new_repo && " (new repo created)"}
+              </div>
+              <div className="text-gray-300">
+                Branch: <code className="text-accent">{prResult.branch}</code> ·{" "}
+                {prResult.files_committed} files committed · LLM:{" "}
+                {prResult.provider_used}
+              </div>
+              <a
+                href={prResult.pr_url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-accent hover:underline inline-block mt-1"
+              >
+                Open PR on GitHub →
+              </a>
+            </div>
+          )}
+
           <div className="grid md:grid-cols-2 gap-4">
             {results.map((tc, i) => (
               <TestCaseCard key={tc.test_case_id ?? i} tc={tc} index={i} />
             ))}
           </div>
         </div>
+      )}
+
+      {/* Phase 13.2 — Saved tests / staleness panel.
+          Shows whenever a repo is picked, independent of generation state. */}
+      {repoFullName && (
+        <SavedTestsPanel
+          mainOwner={repoFullName.split("/")[0] ?? ""}
+          mainRepo={repoFullName.split("/")[1] ?? ""}
+        />
       )}
     </section>
   );

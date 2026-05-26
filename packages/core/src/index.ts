@@ -5,6 +5,9 @@
 
 export * from "./types";
 export * from "./prompts/index";
+export * from "./prompts/code";
+export * from "./templates/index";
+export * from "./marker";
 
 /**
  * Strip ``` and ```json fences that some LLMs add despite JSON mode.

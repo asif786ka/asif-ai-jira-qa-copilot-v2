@@ -4,7 +4,8 @@ const nextConfig = {
   transpilePackages: ["@jiraqa/core", "@jiraqa/providers"],
   experimental: {
     serverActions: {
-      bodySizeLimit: "2mb",
+      // Up to 3 screenshots × 5MB each, plus prompt overhead — 20mb is a safe ceiling.
+      bodySizeLimit: "20mb",
     },
   },
   async rewrites() {

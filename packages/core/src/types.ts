@@ -79,12 +79,29 @@ export type TestCase = z.infer<typeof TestCaseSchema>;
 // Generate request / response
 // ────────────────────────────────────────────────────────────────────────────
 
+/**
+ * A screenshot attached to a generation request. Data URL only — the same
+ * format the LLM providers consume. Validation caps both individual size
+ * (5 MB encoded) and total count (3) at the API layer.
+ */
+export const ScreenshotSchema = z.object({
+  data_url: z
+    .string()
+    .regex(/^data:image\/(png|jpeg|jpg|webp|gif);base64,/, {
+      message: "Must be a base64 image data URL (png/jpeg/webp/gif).",
+    }),
+  label: z.string().max(200).optional(),
+});
+export type Screenshot = z.infer<typeof ScreenshotSchema>;
+
 export const GenerateRequestSchema = z.object({
   ticket: JiraTicketSchema,
   platform: PlatformSchema,
   repo_context: RepoContextSchema.optional(),
-  provider: z.enum(["openai", "gemini"]).optional(),
+  provider: z.enum(["openai", "gemini", "anthropic"]).optional(),
   count_hint: z.number().int().min(3).max(8).optional().default(5),
+  /** Phase 12 — optional screenshots. Triggers vision-LLM routing. */
+  screenshots: z.array(ScreenshotSchema).max(3).optional(),
 });
 export type GenerateRequest = z.infer<typeof GenerateRequestSchema>;
 
@@ -141,6 +158,88 @@ export interface SessionData {
   tenant_id?: string;
   jira?: JiraConnection;
   github?: GitHubConnection;
-  preferred_provider?: "openai" | "gemini";
+  preferred_provider?: "openai" | "gemini" | "anthropic";
   preferred_backend?: "typescript" | "python";
+  // Phase 11: per-repo E2E test conventions. Keyed by "<owner>/<repo>"
+  // so a user with multiple connected repos can configure each independently.
+  repo_conventions?: Record<string, RepoConventions>;
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Phase 11 — E2E test conventions per repo.
+// Tenant-scoped storage means each user's preferences ride with their cookie.
+// ────────────────────────────────────────────────────────────────────────────
+
+export const TestFormatSchema = z.enum(["maestro", "xcuitest", "espresso"]);
+export type TestFormat = z.infer<typeof TestFormatSchema>;
+
+export const CiPlatformSchema = z.enum([
+  "github_actions",
+  "circleci",
+  "both",
+  "none",
+]);
+export type CiPlatform = z.infer<typeof CiPlatformSchema>;
+
+export const ExecutionBackendSchema = z.enum([
+  "local", // simulator/emulator on the user's machine
+  "github_actions", // macOS / Linux runners
+  "maestro_cloud", // mobile.dev paid
+  "firebase_test_lab", // Google
+  "browserstack", // paid
+  "saucelabs", // paid
+  "lambdatest", // paid
+]);
+export type ExecutionBackend = z.infer<typeof ExecutionBackendSchema>;
+
+export const RepoConventionsSchema = z.object({
+  // Which platform these conventions apply to.
+  platform: PlatformSchema,
+
+  // ── Test format ────────────────────────────────────────────────────────
+  // Default Maestro (YAML, easy, separate-repo, zero risk).
+  // XCUITest = Swift, iOS power users.
+  // Espresso = Kotlin, Android power users.
+  test_format: TestFormatSchema.default("maestro"),
+
+  // ── E2E repo strategy ──────────────────────────────────────────────────
+  // For Maestro: always "separate" — one repo per platform (user's call).
+  // For XCUITest/Espresso: "separate" (recommended, zero risk) or
+  // "same" (lives inside the main app project — requires safety net).
+  repo_strategy: z.enum(["separate", "same"]).default("separate"),
+
+  // The target e2e repo name. If omitted we propose `<app>-ios-e2e` /
+  // `<app>-android-e2e` and create it during the first PR.
+  e2e_repo_name: z.string().optional(),
+
+  // ── CI ─────────────────────────────────────────────────────────────────
+  ci_platform: CiPlatformSchema.default("github_actions"),
+  use_fastlane: z.boolean().default(true),
+
+  // ── Execution backend (where tests actually run) ───────────────────────
+  execution_backend: ExecutionBackendSchema.default("local"),
+
+  // ── iOS-specific ───────────────────────────────────────────────────────
+  ios_bundle_id: z.string().optional(), // auto-detected
+  ios_deployment_target: z.string().optional(), // e.g. "17.0"
+  ios_dependency_manager: z
+    .enum(["spm", "cocoapods", "carthage", "tuist", "xcodegen"])
+    .optional(),
+  // For separate-repo XCUITest: simulator-only by default (no Apple Dev acct).
+  ios_signing_mode: z.enum(["simulator_only", "device"]).default("simulator_only"),
+
+  // ── Android-specific ───────────────────────────────────────────────────
+  android_application_id: z.string().optional(), // e.g. "com.acme.app"
+  android_min_sdk: z.number().int().optional(),
+
+  // ── Patterns ───────────────────────────────────────────────────────────
+  use_robot_pattern: z.boolean().default(true), // Robot / Page Object
+  selector_strategy: z
+    .enum(["accessibility_id", "label_text", "hybrid"])
+    .default("accessibility_id"),
+
+  // ── Metadata ───────────────────────────────────────────────────────────
+  detected_at: z.string().optional(), // ISO timestamp of last auto-detect
+  saved_at: z.string().optional(),
+});
+export type RepoConventions = z.infer<typeof RepoConventionsSchema>;

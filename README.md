@@ -22,6 +22,8 @@ Then:
 git clone https://github.com/asif786ka/asif-ai-jira-qa-copilot-v2.git
 cd asif-ai-jira-qa-copilot-v2
 
+#refresh
+#Ctrl-C 
 # One command — installs deps, bootstraps .env.local, starts both backends:
 ./run-dev.sh
 ```
