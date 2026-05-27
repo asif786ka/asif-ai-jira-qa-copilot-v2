@@ -7,6 +7,7 @@
 
 import type { JiraTicket } from "@jiraqa/core";
 import type {
+  JiraIncident,
   JiraIssueSummary,
   JiraProject,
   JiraProvider,
@@ -141,6 +142,80 @@ export class JiraCloudProvider implements JiraProvider {
       status: i.fields.status?.name ?? "unknown",
       priority: i.fields.priority?.name,
       updated: i.fields.updated,
+    }));
+  }
+
+  /**
+   * List bug / incident tickets created since the given date. Uses JQL
+   * targeting type Bug OR priority Critical/Highest. Returns timestamps
+   * needed for DORA change-failure-rate and MTTR.
+   */
+  async listIncidents({
+    projectKey,
+    since,
+    limit = 100,
+  }: {
+    projectKey?: string;
+    since: Date;
+    limit?: number;
+  }): Promise<JiraIncident[]> {
+    const jqlParts: string[] = [];
+    if (projectKey) jqlParts.push(`project = ${projectKey}`);
+    jqlParts.push(
+      "(issuetype = Bug OR priority in (Highest, Critical) OR labels = incident)",
+    );
+    // Jira accepts date in yyyy-MM-dd; we use a wide buffer.
+    const sinceStr = since.toISOString().slice(0, 10);
+    jqlParts.push(`created >= "${sinceStr}"`);
+    const jql = `${jqlParts.join(" AND ")} ORDER BY created DESC`;
+
+    const fields = ["summary", "issuetype", "priority", "status", "created", "resolutiondate"];
+
+    type IssueShape = {
+      key: string;
+      fields: {
+        summary: string;
+        issuetype?: { name?: string };
+        priority?: { name?: string };
+        status?: { name?: string; statusCategory?: { key?: string } };
+        created: string;
+        resolutiondate?: string | null;
+      };
+    };
+
+    let issues: IssueShape[] = [];
+    try {
+      const data = await this.req<{ issues: IssueShape[] }>(
+        "/rest/api/3/search/jql",
+        {
+          method: "POST",
+          body: JSON.stringify({ jql, fields, maxResults: limit }),
+        },
+      );
+      issues = data.issues ?? [];
+    } catch {
+      // Legacy fallback for older Jira Server / DC installs.
+      try {
+        const data = await this.req<{ issues: IssueShape[] }>(
+          `/rest/api/3/search?jql=${encodeURIComponent(jql)}&fields=${fields.join(",")}&maxResults=${limit}`,
+        );
+        issues = data.issues ?? [];
+      } catch {
+        return [];
+      }
+    }
+
+    return issues.map((i) => ({
+      key: i.key,
+      summary: i.fields.summary,
+      priority: i.fields.priority?.name,
+      issue_type: i.fields.issuetype?.name,
+      created: i.fields.created,
+      resolved:
+        i.fields.resolutiondate ??
+        (i.fields.status?.statusCategory?.key === "done"
+          ? i.fields.created // fallback to created if Done but no resolutiondate
+          : null),
     }));
   }
 

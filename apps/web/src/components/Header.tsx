@@ -33,6 +33,12 @@ export function Header() {
           >
             Generator
           </Link>
+          <Link
+            href="/dora"
+            className="text-xs px-3 py-1.5 rounded-lg border border-border bg-bg-panel hover:bg-white/5"
+          >
+            DORA
+          </Link>
           <ProviderSwitcher />
           <BackendSwitcher />
         </nav>

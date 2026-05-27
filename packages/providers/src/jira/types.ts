@@ -22,6 +22,15 @@ export interface JiraIssueSummary {
   updated?: string;
 }
 
+export interface JiraIncident {
+  key: string;
+  summary: string;
+  priority?: string;
+  issue_type?: string;
+  created: string; // ISO
+  resolved?: string | null; // ISO when status reached "Done" / category Done
+}
+
 export interface JiraProvider {
   readonly name: string;
   /** Verify credentials work — used by /api/connections/test. */
@@ -34,4 +43,13 @@ export interface JiraProvider {
   }): Promise<JiraIssueSummary[]>;
   /** Returns a canonical JiraTicket ready to feed the prompt builder. */
   getIssue(key: string): Promise<JiraTicket>;
+  /**
+   * List bug / incident-style tickets created in a window. Used by DORA
+   * change-failure-rate and MTTR calculations.
+   */
+  listIncidents(opts: {
+    projectKey?: string;
+    since: Date;
+    limit?: number;
+  }): Promise<JiraIncident[]>;
 }

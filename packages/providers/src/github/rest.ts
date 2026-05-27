@@ -336,6 +336,66 @@ export class GitHubRestProvider implements GitHubProvider {
   }
 
   /**
+   * List merged PRs in a window, used for DORA deployment frequency
+   * and lead-time computation. Returns the most recent first, oldest last.
+   */
+  async listMergedPRs(opts: {
+    owner: string;
+    repo: string;
+    since: Date;
+    base?: string; // default "main"
+    limit?: number;
+  }): Promise<
+    Array<{
+      number: number;
+      title: string;
+      merged_at: string;
+      created_at: string;
+      html_url: string;
+    }>
+  > {
+    const base = opts.base ?? "main";
+    const limit = opts.limit ?? 100;
+    // The PRs API doesn't filter by merged_at server-side; we filter client-side.
+    // For most teams 100 closed PRs is plenty of headroom for a 90-day window.
+    try {
+      const data = await this.req<
+        Array<{
+          number: number;
+          title: string;
+          merged_at: string | null;
+          created_at: string;
+          base: { ref: string };
+          html_url: string;
+        }>
+      >(
+        `/repos/${opts.owner}/${opts.repo}/pulls?state=closed&base=${encodeURIComponent(base)}&per_page=${limit}&sort=updated&direction=desc`,
+      );
+      const out: Array<{
+        number: number;
+        title: string;
+        merged_at: string;
+        created_at: string;
+        html_url: string;
+      }> = [];
+      for (const p of data) {
+        if (!p.merged_at) continue;
+        if (new Date(p.merged_at) < opts.since) continue;
+        out.push({
+          number: p.number,
+          title: p.title,
+          merged_at: p.merged_at,
+          created_at: p.created_at,
+          html_url: p.html_url,
+        });
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * List branches in a repo, optionally filtered by name prefix.
    * Used by staleness detection to find pending jiraqa/* PR branches.
    */
