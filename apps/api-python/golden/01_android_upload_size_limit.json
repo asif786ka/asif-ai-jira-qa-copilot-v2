@@ -1,0 +1,24 @@
+{
+  "name": "android_upload_size_limit",
+  "platform": "android",
+  "description": "Mid-complexity Android story with clear AC and measurable thresholds. The generator should produce happy-path, negative (oversized image), edge (boundary 5MB), and accessibility considerations.",
+  "ticket": {
+    "ticket_id": "KAN-201",
+    "summary": "Upload profile picture validates file size",
+    "description": "On the Profile Settings screen, when the user taps 'Change picture' and selects an image larger than 5 MB, the app must reject the upload, show a toast 'File too large, max 5 MB', and leave the existing avatar unchanged. Images at or below 5 MB upload normally and update the avatar within 3 seconds.",
+    "acceptance_criteria": [
+      "Given user is on Profile Settings, when they pick a 10 MB image, then a toast 'File too large, max 5 MB' appears and the avatar is unchanged.",
+      "Given user is on Profile Settings, when they pick a 4 MB image, then the avatar updates to the new image within 3 seconds.",
+      "Given user is on Profile Settings, when they pick a corrupt image file, then a toast 'Invalid image' appears."
+    ],
+    "issue_type": "story",
+    "priority": "medium"
+  },
+  "expected_scenarios": [
+    "happy path: small image uploads",
+    "negative: oversize rejected with toast",
+    "edge: exactly 5 MB boundary",
+    "negative: corrupt image",
+    "accessibility / talkback for toast"
+  ]
+}

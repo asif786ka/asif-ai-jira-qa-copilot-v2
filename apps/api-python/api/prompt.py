@@ -149,3 +149,157 @@ def build_user_prompt(
     lines.append("")
     lines.append("Return ONLY the JSON object as specified in the system prompt.")
     return "\n".join(lines)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Ticket-quality rubric prompts (used by validation.py / LLM rubric pass)
+#
+# These run AFTER the deterministic rules in validation.py have passed. We
+# hand the LLM the ticket and ask it to act as a senior QA reviewer: is this
+# ticket actually testable, or just well-formed-but-vague? The deterministic
+# rules can't catch "make it work better" — the rubric can.
+#
+# Output is a JSON object with a fixed shape so validation.py can parse it
+# without prose / fence stripping. Score < 70 means the ticket fails.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def build_rubric_system_prompt() -> str:
+    return """You are a senior QA reviewer. Your job is to decide whether a Jira ticket
+is TESTABLE — i.e. whether a QA engineer could write a step-by-step test case
+from it without guessing.
+
+Score the ticket on a 0-100 scale across these dimensions:
+  1. Clarity of expected behaviour — Are post-conditions measurable, or vague
+     ("snappier", "more reliable", "better UX")?
+  2. Acceptance criteria quality — Are they Given/When/Then-style with concrete
+     inputs and outputs, or do they restate the summary?
+  3. Preconditions / environment — Is the starting state specified well enough
+     to reproduce the scenario?
+  4. Edge / negative coverage — Does the ticket hint at boundaries, errors,
+     empty states, or only the happy path?
+
+Threshold: score >= 70 ⇒ passed=true. Score < 70 ⇒ passed=false and you MUST
+populate `issues` explaining what to fix.
+
+OUTPUT
+Return ONLY a JSON object matching exactly this shape, no prose, no fences:
+{
+  "score": <integer 0-100>,
+  "passed": <boolean>,
+  "summary": "<one-sentence verdict>",
+  "issues": [
+    {
+      "field": "summary" | "description" | "acceptance_criteria" | "ticket",
+      "code": "<snake_case identifier, e.g. ambiguous_expected_behavior>",
+      "severity": "error",
+      "message": "<what's wrong in plain English>",
+      "hint": "<concrete suggestion for how to fix it>"
+    }
+  ]
+}
+If passed=true, `issues` MUST be an empty list."""
+
+
+def build_judge_system_prompt() -> str:
+    """System prompt for the LLM judge that scores generated test cases.
+
+    The judge is a senior QA reviewer evaluating a BATCH of generated test
+    cases against the ORIGINAL ticket. It scores on four dimensions and
+    flags individual problematic cases by test_case_id.
+
+    Threshold: score >= 70 ⇒ acceptable. Below 70 doesn't auto-reject (we
+    surface the score in the UI for the human reviewer to act on); the
+    hard gate is the deterministic linter, not this judge.
+    """
+    return """You are a senior QA reviewer. You are given a Jira ticket and a batch of
+test cases generated from it. Your job is to score the BATCH on a 0-100 scale
+and flag any individual test cases that are weak or hallucinated.
+
+Score across four dimensions (equal weight):
+  1. COVERAGE — Does the batch cover positive, negative, and edge cases for
+     the behaviour the ticket describes? Are there obvious scenarios missing?
+  2. ATOMICITY — Is each test step exactly one user action, or are some
+     compound ("tap X and verify Y")?
+  3. MEASURABILITY — Is each expected_result specific and verifiable, or
+     vague ("it works", "behaves correctly")?
+  4. GROUNDEDNESS — Do test cases reference real UI elements / behaviour
+     from the ticket, or did the LLM invent buttons / screens / data that
+     the ticket doesn't mention?
+
+OUTPUT
+Return ONLY a JSON object matching exactly this shape, no prose, no fences:
+{
+  "score": <integer 0-100>,
+  "summary": "<one-sentence overall verdict>",
+  "per_case_flags": [
+    {
+      "test_case_id": "TC-002",
+      "code": "<snake_case, e.g. hallucinated_ui_element | redundant | untestable>",
+      "message": "<what's wrong with this specific case>",
+      "hint": "<how to fix it>"
+    }
+  ]
+}
+Only include per_case_flags for cases that have real issues. An empty
+per_case_flags list means every case is acceptable individually."""
+
+
+def build_judge_user_prompt(
+    ticket: JiraTicket,
+    platform: Platform,
+    generated_cases: list[dict],
+) -> str:
+    """Render the prompt body for the judge. `generated_cases` is the JSON
+    representation of TestCase objects (dump via model_dump)."""
+    import json as _json
+
+    lines: list[str] = []
+    lines.append("# ORIGINAL TICKET")
+    lines.append(f"Ticket ID: {ticket.ticket_id}")
+    lines.append(f"Summary: {ticket.summary}")
+    lines.append(f"Platform: {platform.value}")
+    if ticket.description:
+        lines.append(f"Description: {ticket.description}")
+    if ticket.acceptance_criteria:
+        lines.append("Acceptance Criteria:")
+        for i, ac in enumerate(ticket.acceptance_criteria, 1):
+            lines.append(f"  {i}. {ac}")
+    lines.append("")
+    lines.append(f"# GENERATED TEST CASES ({len(generated_cases)})")
+    # Pretty-print compactly so the judge gets readable input without blowing
+    # the context budget on a long ticket batch.
+    lines.append(_json.dumps(generated_cases, indent=2)[:8000])
+    lines.append("")
+    lines.append("Return ONLY the JSON object as specified in the system prompt.")
+    return "\n".join(lines)
+
+
+def build_rubric_user_prompt(ticket: JiraTicket, platform: Platform) -> str:
+    lines: list[str] = []
+    lines.append("# JIRA TICKET TO REVIEW")
+    lines.append(f"Ticket ID: {ticket.ticket_id}")
+    lines.append(f"Summary: {ticket.summary}")
+    lines.append(f"Issue Type: {ticket.issue_type.value}")
+    lines.append(f"Priority: {ticket.priority.value}")
+    if ticket.component:
+        lines.append(f"Component: {ticket.component}")
+    if ticket.environment:
+        lines.append(f"Environment: {ticket.environment}")
+    if ticket.labels:
+        lines.append(f"Labels: {', '.join(ticket.labels)}")
+    lines.append("")
+    lines.append("Description:")
+    lines.append(ticket.description or "(empty)")
+    lines.append("")
+    lines.append("Acceptance Criteria:")
+    if ticket.acceptance_criteria:
+        for i, ac in enumerate(ticket.acceptance_criteria, 1):
+            lines.append(f"  {i}. {ac}")
+    else:
+        lines.append("  (none)")
+    lines.append("")
+    lines.append(f"Target platform: {platform.value}")
+    lines.append("")
+    lines.append("Return ONLY the JSON object as specified in the system prompt.")
+    return "\n".join(lines)

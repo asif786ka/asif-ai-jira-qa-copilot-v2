@@ -102,6 +102,8 @@ export const GenerateRequestSchema = z.object({
   count_hint: z.number().int().min(3).max(8).optional().default(5),
   /** Phase 12 — optional screenshots. Triggers vision-LLM routing. */
   screenshots: z.array(ScreenshotSchema).max(3).optional(),
+  /** Layer 2 — opt-in LLM-as-judge quality score. Off by default. */
+  judge: z.boolean().optional().default(false),
 });
 export type GenerateRequest = z.infer<typeof GenerateRequestSchema>;
 
@@ -135,6 +137,29 @@ export const ErrorResponseSchema = z.object({
   code: z.string().optional(),
 });
 export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layer 4 — Human feedback on generated test cases
+//
+// Captured per (ticket × test_case_id × user-session) and appended to a
+// JSONL log on the server. The judge is opinionated; the QA team is right.
+// This is the data that tells us which providers / prompts perform best.
+// ────────────────────────────────────────────────────────────────────────────
+
+export const FeedbackRatingSchema = z.enum(["up", "down"]);
+export type FeedbackRating = z.infer<typeof FeedbackRatingSchema>;
+
+export const FeedbackEventSchema = z.object({
+  ticket_id: z.string(),
+  test_case_id: z.string(),
+  rating: FeedbackRatingSchema,
+  /** Optional free-text reason, e.g. "vague expected_result". Capped at 280. */
+  reason: z.string().max(280).optional(),
+  /** Which LLM produced this test case (so we can aggregate per provider). */
+  provider: z.string().optional(),
+  platform: PlatformSchema.optional(),
+});
+export type FeedbackEvent = z.infer<typeof FeedbackEventSchema>;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Session / connections — what we persist in the encrypted cookie.

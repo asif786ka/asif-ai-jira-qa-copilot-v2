@@ -1,0 +1,24 @@
+{
+  "name": "android_bug_crash",
+  "platform": "android",
+  "description": "Real bug report with steps to reproduce and expected vs actual. Tests the generator's ability to write regression tests from bug repros.",
+  "ticket": {
+    "ticket_id": "KAN-204",
+    "summary": "App crashes when opening Profile while offline",
+    "description": "Steps to reproduce:\n1) Sign in normally with network connection\n2) Enable airplane mode on the device\n3) From Home, tap the Profile bottom-nav tab\n\nExpected: Profile screen shows cached user info and a banner 'You are offline'.\nActual: App crashes immediately with an NPE in ProfileViewModel.load(). Crashlytics shows ~1200 instances in the last 7 days.",
+    "acceptance_criteria": [
+      "Given the user is signed in and offline, when they tap Profile, then the Profile screen renders cached info with an 'Offline' banner.",
+      "Given the user is offline with no cached profile, when they tap Profile, then a friendly empty state 'Couldn't load profile — try again when online' is shown.",
+      "No NullPointerException is reported in Crashlytics for ProfileViewModel.load() after the fix."
+    ],
+    "issue_type": "bug",
+    "priority": "critical"
+  },
+  "expected_scenarios": [
+    "regression: offline + cached → renders banner",
+    "regression: offline + no cache → empty state",
+    "negative: crashlytics zero NPE assertion",
+    "edge: airplane mode toggled during navigation",
+    "happy path: online unaffected"
+  ]
+}

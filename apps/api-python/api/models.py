@@ -82,6 +82,9 @@ class GenerateRequest(BaseModel):
     repo_context: Optional[RepoContext] = None
     provider: Optional[str] = None  # "openai" | "gemini"
     count_hint: int = Field(default=5, ge=3, le=8)
+    # Layer 2 — opt-in LLM-as-judge quality score. Off by default to keep
+    # /generate cheap; the UI flips it on for interactive sessions.
+    judge: bool = False
 
 
 class GenerateResponse(BaseModel):
@@ -104,3 +107,48 @@ class ErrorResponse(BaseModel):
     error: str
     details: Optional[str] = None
     code: Optional[str] = None
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Ticket validation (Phase: QA-readiness gate)
+#
+# These models are the wire shape for /pyapi/validate-ticket and for the
+# `validation` envelope returned by /pyapi/generate when a ticket is rejected.
+#
+# Design notes:
+#   - We keep `severity` as a plain string ("error" | "warning") instead of an
+#     Enum so the field stays forward-compatible if we later add "info" or
+#     "blocker" without breaking older clients.
+#   - `code` is a stable machine-readable identifier (e.g. "summary_too_short")
+#     so the UI can localise messages or link to a docs page per code.
+#   - `field` points at the JiraTicket field the issue is about, or "ticket"
+#     for cross-field / whole-ticket issues. This lets the UI scroll to /
+#     highlight the right input.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TicketValidationIssue(BaseModel):
+    field: str  # "summary" | "description" | "acceptance_criteria" | "ticket"
+    code: str  # stable identifier, e.g. "summary_too_short"
+    severity: str = "error"  # "error" | "warning"
+    message: str  # human-readable description of what's wrong
+    hint: Optional[str] = None  # actionable suggestion for how to fix it
+
+
+class TicketValidationResult(BaseModel):
+    passed: bool
+    issues: list[TicketValidationIssue] = Field(default_factory=list)
+    # Populated only when the LLM rubric ran. None means rubric was skipped
+    # (use_llm_rubric=False) or failed silently (we never block on rubric
+    # infra errors — see validation.py for the fallback path).
+    rubric_score: Optional[int] = None
+    rubric_summary: Optional[str] = None
+
+
+class ValidateTicketRequest(BaseModel):
+    ticket: JiraTicket
+    platform: Platform
+    # Opt-in second pass. UI sends True by default; CI / batch jobs that just
+    # want the deterministic rules can pass False to skip the LLM cost.
+    use_llm_rubric: bool = True
+    provider: Optional[str] = None  # mirrors GenerateRequest.provider

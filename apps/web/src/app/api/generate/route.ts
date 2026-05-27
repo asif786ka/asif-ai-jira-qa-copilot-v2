@@ -12,8 +12,15 @@
 import {
   GenerateRequestSchema,
   GenerateResponseSchema,
+  buildJudgeSystemPrompt,
+  buildJudgeUserPrompt,
   buildSystemPrompt,
   buildUserPrompt,
+  errorsOnly,
+  lintGeneratedCases,
+  parseJudgeResponse,
+  runDeterministicRules,
+  type QualityScore,
 } from "@jiraqa/core";
 import { resolveLLMProvider, resolveVisionProvider } from "@jiraqa/providers";
 import { errorResponse, jsonResponse } from "@/lib/utils";
@@ -28,8 +35,25 @@ export async function POST(req: Request) {
   if (!parsed.success) {
     return errorResponse("Invalid request body", 400, parsed.error.message);
   }
-  const { ticket, platform, repo_context, provider, count_hint, screenshots } =
+  const { ticket, platform, repo_context, provider, count_hint, screenshots, judge } =
     parsed.data;
+
+  // 1b. Gate on ticket quality. If the QA-readiness rules fail, short-circuit
+  // with 422 BEFORE spending an LLM call. The semantic rubric pass is
+  // intentionally NOT run here — that's what /api/validate-ticket is for.
+  // This gate is the cheap, deterministic safety net: malformed tickets
+  // never reach the (paid) generation step.
+  const ruleIssues = runDeterministicRules(ticket);
+  if (ruleIssues.length > 0) {
+    return jsonResponse(
+      {
+        error: "Ticket failed validation",
+        code: "ticket_validation_failed",
+        validation: { passed: false, issues: ruleIssues },
+      },
+      422,
+    );
+  }
 
   // 2. Resolve provider. If screenshots are attached, route to a vision-capable
   //    provider (Anthropic > OpenAI > Gemini). Otherwise use the standard
@@ -99,5 +123,57 @@ export async function POST(req: Request) {
       validated.error.message,
     );
   }
-  return jsonResponse(validated.data);
+
+  // 6. Output linter — content quality, not just shape. Reject the batch
+  // when any error-severity issue is present. Warnings (e.g. missing edge
+  // coverage) are returned as `lint_warnings` so the UI can display them
+  // without blocking the user.
+  const lintIssues = lintGeneratedCases(validated.data.generated_test_cases, platform);
+  const hardFailures = errorsOnly(lintIssues);
+  if (hardFailures.length > 0) {
+    return jsonResponse(
+      {
+        error: "Generated test cases failed quality lint",
+        code: "output_validation_failed",
+        validation: { passed: false, issues: lintIssues },
+        partial_response: validated.data,
+      },
+      422,
+    );
+  }
+
+  // 7. LLM-as-judge — opt-in, never blocks. Failures are silently swallowed
+  // and the user still gets their test cases. Different LLM instance from
+  // the generator when possible — JUDGE_PROVIDER env var pins it.
+  let quality: QualityScore | undefined;
+  if (judge) {
+    try {
+      const judgeProviderName = process.env.JUDGE_PROVIDER as
+        | "openai"
+        | "gemini"
+        | "anthropic"
+        | undefined;
+      const { resolveLLMProvider } = await import("@jiraqa/providers");
+      const judgeLlm = resolveLLMProvider(judgeProviderName);
+      const judgeRes = await judgeLlm.complete({
+        systemPrompt: buildJudgeSystemPrompt(),
+        userPrompt: buildJudgeUserPrompt(
+          ticket,
+          platform,
+          validated.data.generated_test_cases,
+        ),
+        temperature: 0.1,
+        jsonMode: true,
+        maxTokens: 1200,
+      });
+      quality = parseJudgeResponse(judgeRes.text, judgeLlm.name);
+    } catch {
+      quality = { score: null, summary: null, per_case_flags: [] };
+    }
+  }
+
+  const responsePayload: Record<string, unknown> = { ...validated.data };
+  if (lintIssues.length > 0) responsePayload.lint_warnings = lintIssues;
+  if (quality) responsePayload.quality = quality;
+  return jsonResponse(responsePayload);
 }

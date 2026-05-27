@@ -1,0 +1,25 @@
+{
+  "name": "ios_biometric_login",
+  "platform": "ios",
+  "description": "iOS-specific feature exercising Face ID, fallback flows, and OS-level prompts. Tests grounded use of XCUITest selectors and platform vocabulary.",
+  "ticket": {
+    "ticket_id": "KAN-202",
+    "summary": "Enable Face ID login from Account Settings",
+    "description": "From Account > Security, the user can enable 'Sign in with Face ID'. When enabled, subsequent app launches present the Face ID prompt before showing the Home screen. If the user cancels or Face ID fails three times, the app falls back to password entry. The toggle reflects state across kills.",
+    "acceptance_criteria": [
+      "Given Face ID is supported and enrolled, when the user toggles 'Face ID login' ON, then a confirmation alert appears and the toggle is saved.",
+      "Given Face ID login is enabled, when the user launches the app, then the Face ID prompt appears and on success the Home screen is shown.",
+      "Given Face ID login is enabled, when the user cancels the Face ID prompt three times in a row, then the password screen is shown.",
+      "Given Face ID is unsupported on the device, when the user opens Account > Security, then the toggle is disabled with text 'Face ID not available'."
+    ],
+    "issue_type": "story",
+    "priority": "high"
+  },
+  "expected_scenarios": [
+    "happy path: enable then launch with Face ID success",
+    "negative: cancel 3x → password fallback",
+    "edge: unsupported device shows disabled toggle",
+    "edge: app killed then relaunched preserves state",
+    "accessibility: VoiceOver reads disabled state correctly"
+  ]
+}

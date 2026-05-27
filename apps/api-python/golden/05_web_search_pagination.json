@@ -1,0 +1,26 @@
+{
+  "name": "web_search_pagination",
+  "platform": "web",
+  "description": "Search + pagination + URL state — common SaaS pattern. Catches generators that miss URL/back-button behaviour or empty-state UX.",
+  "ticket": {
+    "ticket_id": "KAN-205",
+    "summary": "Search results page supports pagination and deep-linking",
+    "description": "On /search, entering a query and pressing Enter shows up to 20 results per page. Below the results is a pager: Previous, page numbers, Next. The URL updates to /search?q=...&page=N when the user paginates. Hitting the browser Back button returns to the previous page of results. If no results are found, an empty-state illustration and 'No results for X — try a different query' is shown.",
+    "acceptance_criteria": [
+      "Given a query with 47 matching results, when the user lands on /search?q=foo, then 20 results are shown and the pager lists pages 1-3.",
+      "Given the user is on page 1, when they click Next, then page 2 results render and the URL updates to ?q=foo&page=2.",
+      "Given the user navigated 1 → 2 → 3, when they press the browser Back button, then page 2 is restored.",
+      "Given a query with zero matches, when the user submits, then the empty-state component and 'No results for foo' is shown.",
+      "Given a slow network (3G throttle), when the user paginates, then a loading skeleton appears within 200ms."
+    ],
+    "issue_type": "story",
+    "priority": "medium"
+  },
+  "expected_scenarios": [
+    "happy path: paginate forward",
+    "deep link: arrive at ?page=3 directly",
+    "browser back: restores previous page state",
+    "empty state: zero results UX",
+    "loading: skeleton on slow network"
+  ]
+}

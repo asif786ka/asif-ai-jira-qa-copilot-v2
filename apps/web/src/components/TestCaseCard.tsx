@@ -1,8 +1,16 @@
 "use client";
 
 import { useState } from "react";
-import type { TestCase } from "@jiraqa/core";
-import { ChevronDown, ChevronUp, CheckCircle2, Circle } from "lucide-react";
+import type { PerCaseFlag, TestCase } from "@jiraqa/core";
+import {
+  ChevronDown,
+  ChevronUp,
+  CheckCircle2,
+  Circle,
+  ThumbsUp,
+  ThumbsDown,
+  AlertTriangle,
+} from "lucide-react";
 
 const PRIORITY_STYLE: Record<string, string> = {
   critical: "border-red-500/40 text-red-300 bg-red-500/10",
@@ -11,9 +19,50 @@ const PRIORITY_STYLE: Record<string, string> = {
   low: "border-gray-500/40 text-gray-300 bg-gray-500/10",
 };
 
-export function TestCaseCard({ tc, index }: { tc: TestCase; index: number }) {
+type Props = {
+  tc: TestCase;
+  index: number;
+  // Layer 4 — feedback metadata. The parent passes the ticket id and provider
+  // so the feedback log can group by them later. `judgeFlag` is the matching
+  // per_case_flag from the LLM-as-judge verdict, if any.
+  ticketId?: string;
+  provider?: string;
+  judgeFlag?: PerCaseFlag;
+};
+
+export function TestCaseCard({ tc, index, ticketId, provider, judgeFlag }: Props) {
   const [open, setOpen] = useState(false);
+  // Local rating state — once the user clicks, persist via /api/feedback.
+  // We don't refetch; the optimistic update is enough for in-session UX.
+  const [rating, setRating] = useState<"up" | "down" | null>(null);
+  const [posting, setPosting] = useState(false);
   const priorityClass = PRIORITY_STYLE[tc.priority ?? "medium"] ?? PRIORITY_STYLE.medium;
+
+  async function rate(value: "up" | "down") {
+    if (posting) return;
+    setPosting(true);
+    // Optimistic: flip immediately. Roll back only on a hard server error.
+    const previous = rating;
+    setRating(value);
+    try {
+      const res = await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ticket_id: ticketId ?? "unknown",
+          test_case_id: tc.test_case_id,
+          rating: value,
+          provider,
+          platform: tc.platform,
+        }),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+    } catch {
+      setRating(previous);
+    } finally {
+      setPosting(false);
+    }
+  }
 
   return (
     <article
@@ -43,14 +92,64 @@ export function TestCaseCard({ tc, index }: { tc: TestCase; index: number }) {
           </div>
           <h3 className="mt-2 text-sm font-medium">{tc.test_scenario}</h3>
         </div>
-        <button
-          onClick={() => setOpen((o) => !o)}
-          className="text-gray-400 hover:text-white"
-          aria-label={open ? "Collapse" : "Expand"}
-        >
-          {open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-        </button>
+        <div className="flex items-center gap-1">
+          {/* Layer 4 — thumbs feedback. Persists to /api/feedback.
+              We render unlabelled icon buttons to keep the header compact;
+              the title attribute provides hover + assistive context. */}
+          <button
+            onClick={() => rate("up")}
+            disabled={posting}
+            title="Useful test case"
+            aria-pressed={rating === "up"}
+            aria-label="Mark useful"
+            className={`p-1 rounded transition ${
+              rating === "up"
+                ? "text-emerald-300 bg-emerald-500/15"
+                : "text-gray-500 hover:text-emerald-300 hover:bg-white/5"
+            }`}
+          >
+            <ThumbsUp className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => rate("down")}
+            disabled={posting}
+            title="Weak / wrong test case"
+            aria-pressed={rating === "down"}
+            aria-label="Mark not useful"
+            className={`p-1 rounded transition ${
+              rating === "down"
+                ? "text-red-300 bg-red-500/15"
+                : "text-gray-500 hover:text-red-300 hover:bg-white/5"
+            }`}
+          >
+            <ThumbsDown className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => setOpen((o) => !o)}
+            className="text-gray-400 hover:text-white ml-1"
+            aria-label={open ? "Collapse" : "Expand"}
+          >
+            {open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </button>
+        </div>
       </header>
+
+      {/* Layer 2 — judge per-case flag, when the LLM-as-judge marked this
+          specific case as weak / hallucinated / redundant. Surfaces a hint. */}
+      {judgeFlag && (
+        <div className="mt-2 rounded-lg border border-amber-700/40 bg-amber-900/10 px-2.5 py-1.5 text-[11px] text-amber-200 flex items-start gap-2">
+          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <div className="space-y-0.5">
+            <div>
+              <span className="font-mono opacity-70">{judgeFlag.code}:</span>{" "}
+              {judgeFlag.message}
+            </div>
+            {judgeFlag.hint && (
+              <div className="opacity-70">Hint: {judgeFlag.hint}</div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="mt-3 text-xs text-gray-400">
         <span className="text-gray-500">Expected:</span> {tc.expected_result}

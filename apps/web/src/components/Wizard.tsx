@@ -4,10 +4,13 @@ import { useEffect, useState } from "react";
 import type {
   JiraTicket,
   Platform,
+  QualityScore,
   RepoContext,
   RepoConventions,
   Screenshot,
   TestCase,
+  TicketValidationIssue,
+  TicketValidationResult,
 } from "@jiraqa/core";
 import {
   Loader2,
@@ -26,7 +29,9 @@ import {
   CustomScenarioForm,
   type CustomScenarioOutput,
 } from "./CustomScenarioForm";
+import { QualityBadge } from "./QualityBadge";
 import { SavedTestsPanel } from "./SavedTestsPanel";
+import { TicketValidationPanel } from "./TicketValidationPanel";
 
 type SessionView = {
   jira: { site_url: string; email: string; connected: true } | null;
@@ -69,6 +74,21 @@ export function Wizard() {
   const [customOutput, setCustomOutput] = useState<CustomScenarioOutput | null>(
     null,
   );
+
+  // QA-readiness validation. Whenever the active ticket changes, we POST it
+  // to /api/validate-ticket and gate the Generate button on result.passed.
+  // The server-side rules check is the source of truth; this is the friendly
+  // UX layer that surfaces issues before the user clicks Generate.
+  const [validation, setValidation] = useState<TicketValidationResult | null>(
+    null,
+  );
+  const [validating, setValidating] = useState(false);
+
+  // Layer 1+2 — output quality artifacts attached to a successful generation.
+  // `quality` is the judge verdict (LLM-as-judge); `lintWarnings` are the
+  // non-blocking issues from the deterministic linter (e.g. missing edge tag).
+  const [quality, setQuality] = useState<QualityScore | null>(null);
+  const [lintWarnings, setLintWarnings] = useState<TicketValidationIssue[]>([]);
   // When custom is active, override ticket + platform + screenshots from the form.
   const activeTicket: JiraTicket | null =
     source === "custom" ? customOutput?.ticket ?? null : ticket;
@@ -194,14 +214,66 @@ export function Wizard() {
       .catch(() => setConventions(null));
   }, [repoFullName, platform]);
 
+  // ── Validate ticket whenever the active one changes ─────────────────────
+  // Debounced via useEffect — every keystroke in the custom form re-fires
+  // this, so we wait 400ms before sending. We deliberately use the rules-only
+  // path (use_llm_rubric: false) for live validation: cheap, instant, no
+  // LLM cost. Users can still hit Generate, which runs the same rules
+  // server-side as a safety net.
+  useEffect(() => {
+    if (!activeTicket) {
+      setValidation(null);
+      setValidating(false);
+      return;
+    }
+    const ticketSnapshot = activeTicket;
+    const platformSnapshot = activePlatform;
+    setValidating(true);
+    const handle = setTimeout(async () => {
+      try {
+        const res = await fetch("/api/validate-ticket", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            ticket: ticketSnapshot,
+            platform: platformSnapshot,
+            use_llm_rubric: false,
+          }),
+        });
+        const data = (await res.json()) as TicketValidationResult & {
+          error?: string;
+        };
+        if (data && typeof data.passed === "boolean") {
+          setValidation(data);
+        }
+      } catch {
+        // Network blip — leave the last known result so we don't flap.
+      } finally {
+        setValidating(false);
+      }
+    }, 400);
+    return () => {
+      clearTimeout(handle);
+      setValidating(false);
+    };
+  }, [activeTicket, activePlatform]);
+
   // ── Generate ────────────────────────────────────────────────────────────
   async function generate() {
     if (!activeTicket) return;
+    // Hard block at the UI layer too. The server still gates with 422,
+    // but no point firing a request we know will be rejected.
+    if (validation && !validation.passed) {
+      setError("Ticket failed QA-readiness checks — fix the issues listed above.");
+      return;
+    }
     setGenerating(true);
     setError(null);
     setResults(null);
     setProviderUsed("");
     setBackendUsed("");
+    setQuality(null);
+    setLintWarnings([]);
     try {
       const backend = getActiveBackend();
       const endpoint = backend === "python" ? "/pyapi/generate" : "/api/generate";
@@ -214,13 +286,48 @@ export function Wizard() {
           repo_context: repoContext ?? undefined,
           count_hint: 5,
           screenshots: activeScreenshots,
+          // Layer 2 — request the LLM-as-judge quality score. The server may
+          // silently skip it if no provider is configured.
+          judge: true,
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Generation failed");
+      if (!res.ok) {
+        // Two flavours of 422 the server can return:
+        //   - ticket_validation_failed: bad INPUT, rendered via TicketValidationPanel.
+        //   - output_validation_failed: bad OUTPUT (LLM produced unusable test
+        //     cases) — surface in the lint-warnings panel and offer regenerate.
+        if (
+          res.status === 422 &&
+          data?.code === "ticket_validation_failed" &&
+          data?.validation
+        ) {
+          setValidation(data.validation as TicketValidationResult);
+          throw new Error(data.error ?? "Ticket failed validation");
+        }
+        if (
+          res.status === 422 &&
+          data?.code === "output_validation_failed" &&
+          data?.validation
+        ) {
+          setLintWarnings(
+            (data.validation.issues ?? []) as TicketValidationIssue[],
+          );
+          throw new Error(
+            data.error ??
+              "Generated test cases failed quality lint — regenerate to try again.",
+          );
+        }
+        throw new Error(data.error ?? "Generation failed");
+      }
       setResults(data.generated_test_cases ?? []);
       setProviderUsed(data.provider ?? "");
       setBackendUsed(data.backend ?? backend);
+      // Side-channel fields the generator attaches when present.
+      if (data.quality) setQuality(data.quality as QualityScore);
+      if (Array.isArray(data.lint_warnings)) {
+        setLintWarnings(data.lint_warnings as TicketValidationIssue[]);
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -493,15 +600,27 @@ export function Wizard() {
       <div className="lg:col-span-4 space-y-3">
         <h2 className="text-sm font-semibold text-gray-300">3. Generate</h2>
         <div className="card space-y-3">
+          {/* QA-readiness panel — visible whenever a ticket is loaded.
+              Failed validation also disables the Generate button below. */}
+          {activeTicket && (
+            <TicketValidationPanel result={validation} loading={validating} />
+          )}
           <button
             className="btn-primary w-full"
             onClick={generate}
-            disabled={!activeTicket || generating}
+            disabled={
+              !activeTicket ||
+              generating ||
+              validating ||
+              (validation !== null && !validation.passed)
+            }
           >
             {generating ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" /> Generating...
               </>
+            ) : validation && !validation.passed ? (
+              "Fix ticket to generate"
             ) : (
               "Generate test cases"
             )}
@@ -523,6 +642,30 @@ export function Wizard() {
       {/* Results */}
       {results && results.length > 0 && (
         <div className="lg:col-span-12 space-y-3">
+          {/* Layer 2 — LLM-as-judge quality verdict and Layer 1 — deterministic
+              lint warnings. Both are non-blocking (warnings); hard failures
+              go through the 422 path and never reach here. */}
+          {quality && <QualityBadge quality={quality} />}
+          {lintWarnings.length > 0 && (
+            <div className="rounded-lg border border-amber-700/40 bg-amber-900/10 px-3 py-2 text-xs text-amber-200 space-y-1">
+              <div className="font-medium">
+                Output quality warnings ({lintWarnings.length})
+              </div>
+              <ul className="list-disc pl-5 space-y-0.5">
+                {lintWarnings.slice(0, 6).map((w, i) => (
+                  <li key={`${w.code}-${i}`}>
+                    <span className="text-amber-300/80">{w.field}:</span>{" "}
+                    {w.message}
+                  </li>
+                ))}
+                {lintWarnings.length > 6 && (
+                  <li className="opacity-60">
+                    …and {lintWarnings.length - 6} more.
+                  </li>
+                )}
+              </ul>
+            </div>
+          )}
           <div className="flex items-center justify-between flex-wrap gap-2">
             <h2 className="text-sm font-semibold text-gray-300">
               Generated test cases ({results.length})
@@ -579,7 +722,16 @@ export function Wizard() {
 
           <div className="grid md:grid-cols-2 gap-4">
             {results.map((tc, i) => (
-              <TestCaseCard key={tc.test_case_id ?? i} tc={tc} index={i} />
+              <TestCaseCard
+                key={tc.test_case_id ?? i}
+                tc={tc}
+                index={i}
+                ticketId={activeTicket?.ticket_id}
+                provider={providerUsed}
+                judgeFlag={quality?.per_case_flags?.find(
+                  (f) => f.test_case_id === tc.test_case_id,
+                )}
+              />
             ))}
           </div>
         </div>

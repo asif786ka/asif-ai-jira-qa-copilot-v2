@@ -1,0 +1,25 @@
+{
+  "name": "web_checkout_promo_code",
+  "platform": "web",
+  "description": "E-commerce promo code redemption — exercises form validation, async network states, money math, and accessibility.",
+  "ticket": {
+    "ticket_id": "KAN-203",
+    "summary": "Apply promo code at checkout reduces total",
+    "description": "On the Checkout page, a field 'Promo code' allows the user to enter a code. Clicking 'Apply' submits it. Valid codes show a green confirmation 'Code SAVE10 applied — 10% off' and the order total updates to reflect the discount. Invalid codes show a red error 'Invalid or expired code'. Apply is disabled while the request is in flight.",
+    "acceptance_criteria": [
+      "Given an order totaling $100, when the user applies 'SAVE10', then the total updates to $90 and a green confirmation message appears.",
+      "Given an order totaling $100, when the user applies 'NOPE123', then a red error 'Invalid or expired code' appears and the total is unchanged.",
+      "While the apply request is in flight, the Apply button shows a spinner and is disabled.",
+      "Given a stacked code that exceeds the order total, the total is clamped to $0 (not negative)."
+    ],
+    "issue_type": "story",
+    "priority": "medium"
+  },
+  "expected_scenarios": [
+    "happy path: valid code applies discount",
+    "negative: invalid code shows error",
+    "edge: discount exceeds total → clamped to $0",
+    "loading state: spinner + disabled button",
+    "accessibility: error announced to screen readers"
+  ]
+}

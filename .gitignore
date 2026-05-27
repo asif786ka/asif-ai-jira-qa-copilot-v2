@@ -37,3 +37,8 @@ venv/
 
 # OS / scratch
 .cache/
+
+# Layer 4 — feedback log + golden runner output
+.data/
+apps/api-python/golden-results.json
+apps/api-python/golden-output.txt

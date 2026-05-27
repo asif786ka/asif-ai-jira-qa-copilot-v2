@@ -1,0 +1,95 @@
+name: Golden ticket suite
+
+# Runs the AI Jira QA Copilot against the curated golden ticket set on every
+# PR that touches the generator path. Catches prompt / model regressions
+# before they hit main.
+#
+# Required secrets:
+#   OPENAI_API_KEY (or GEMINI_API_KEY / ANTHROPIC_API_KEY) — at least one.
+#   JUDGE_PROVIDER (optional) — pins the LLM-as-judge to a different model
+#     than the generator so we get cross-judging instead of self-judging.
+#
+# To compare a PR against main as a baseline, the workflow downloads the
+# golden-results.json from the latest successful main run and passes it
+# to --baseline. If main hasn't run yet, the diff is skipped.
+
+on:
+  pull_request:
+    paths:
+      - "apps/api-python/api/prompt.py"
+      - "apps/api-python/api/validation.py"
+      - "apps/api-python/api/output_validation.py"
+      - "apps/api-python/api/judge.py"
+      - "apps/api-python/api/main.py"
+      - "apps/api-python/api/models.py"
+      - "apps/api-python/golden/**"
+      - "apps/api-python/scripts/run_golden.py"
+      - "packages/core/src/prompts/**"
+      - ".github/workflows/golden.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  golden:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: apps/api-python/requirements.txt
+
+      - name: Install Python deps
+        working-directory: apps/api-python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Pull the most recent main-branch run's results so we can diff this PR
+      # against it. If the artifact doesn't exist yet we just skip the diff.
+      - name: Download baseline (main)
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          workflow: golden.yml
+          branch: main
+          name: golden-results
+          path: apps/api-python/baseline
+          if_no_artifact_found: warn
+
+      - name: Run golden suite
+        working-directory: apps/api-python
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          JUDGE_PROVIDER: ${{ secrets.JUDGE_PROVIDER }}
+        run: |
+          BASELINE_ARG=""
+          if [ -f baseline/golden-results.json ]; then
+            BASELINE_ARG="--baseline baseline/golden-results.json"
+          fi
+          python scripts/run_golden.py $BASELINE_ARG | tee golden-output.txt
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-results
+          path: |
+            apps/api-python/golden-results.json
+            apps/api-python/golden-output.txt
+          retention-days: 90
+
+      - name: Add summary
+        if: always()
+        run: |
+          echo "## Golden ticket suite" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat apps/api-python/golden-output.txt 2>/dev/null || echo "no output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
