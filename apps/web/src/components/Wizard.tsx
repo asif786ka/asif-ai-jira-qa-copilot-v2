@@ -313,10 +313,10 @@ export function Wizard() {
           setLintWarnings(
             (data.validation.issues ?? []) as TicketValidationIssue[],
           );
-          throw new Error(
-            data.error ??
-              "Generated test cases failed quality lint — regenerate to try again.",
-          );
+          // Suppress the generic error string — the detail panel below the
+          // Generate button renders the issue list and a regenerate button.
+          // Throwing here just stops the success path from running.
+          throw new Error("");
         }
         throw new Error(data.error ?? "Generation failed");
       }
@@ -625,11 +625,68 @@ export function Wizard() {
               "Generate test cases"
             )}
           </button>
-          {error && (
+          {error && error.trim() !== "" && (
             <div className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-lg p-3">
               {error}
             </div>
           )}
+          {/* Layer 1 — output-lint rejection detail.
+              When the 422 "output_validation_failed" path fires, lintWarnings
+              holds the error-severity issues. We render them here so the user
+              sees exactly WHICH rules the LLM tripped (vague expected_result,
+              non-atomic step, missing negative coverage, etc.) and can hit
+              "Generate again" — LLM output is non-deterministic so a fresh
+              roll often passes. */}
+          {(() => {
+            const lintErrors = lintWarnings.filter((i) => i.severity === "error");
+            if (lintErrors.length === 0 || (results && results.length > 0)) return null;
+            return (
+              <div className="rounded-lg border border-red-700/50 bg-red-900/15 p-3 text-xs space-y-2">
+                <div className="text-red-300 font-medium">
+                  LLM output failed {lintErrors.length} quality check
+                  {lintErrors.length === 1 ? "" : "s"}
+                </div>
+                <ul className="space-y-1.5 pl-3 list-disc marker:text-red-500 text-red-100/90">
+                  {lintErrors.slice(0, 5).map((w, i) => (
+                    <li key={`${w.code}-${i}`}>
+                      <div>{w.message}</div>
+                      {w.hint && (
+                        <div className="text-red-300/70 text-[11px] mt-0.5">
+                          Hint: {w.hint}
+                        </div>
+                      )}
+                      <div className="text-red-400/40 font-mono text-[10px]">
+                        {w.code}
+                      </div>
+                    </li>
+                  ))}
+                  {lintErrors.length > 5 && (
+                    <li className="opacity-60">
+                      …and {lintErrors.length - 5} more.
+                    </li>
+                  )}
+                </ul>
+                <button
+                  className="btn-ghost w-full text-xs mt-1"
+                  onClick={generate}
+                  disabled={generating}
+                >
+                  {generating ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" /> Generating…
+                    </>
+                  ) : (
+                    "Generate again"
+                  )}
+                </button>
+                <div className="text-red-300/60 text-[11px] leading-relaxed">
+                  Tip: LLM output is non-deterministic — a second attempt often
+                  passes. If it keeps failing, try a different provider via the
+                  Gemini / OpenAI toggle in the header.
+                </div>
+              </div>
+            );
+          })()}
           {providerUsed && (
             <div className="text-[11px] text-gray-500">
               Used <span className="text-accent">{providerUsed}</span> on{" "}
