@@ -77,7 +77,7 @@ logger = logging.getLogger("jiraqa.python.agentic_e2e")
 # Tunables — mirror the patterns in agentic_graph.py
 # ────────────────────────────────────────────────────────────────────────────
 
-MAX_REPAIRS = 2
+MAX_REPAIRS = 3  # bumped from 2 — LLMs sometimes need a third nudge on Maestro YAML shape
 SCANNER_TEMPERATURE = 0.1
 GENERATOR_TEMPERATURE = 0.2
 REPAIR_TEMPERATURE = 0.15
@@ -309,10 +309,24 @@ Output STRICT JSON with this exact shape — nothing else, no prose, no markdown
 Framework-specific hard requirements:
 
 ## maestro
-- One flow per file. If the test plan has N test cases, produce N files.
-- File MUST be a YAML document with this shape exactly (no leading marker, no extra blank lines):
 
-  ```
+ONE flow per file. If the test plan has N test cases, produce N files — each
+in its own entry of the `files` array. Never concatenate multiple test cases
+into a single YAML.
+
+Every Maestro YAML MUST follow this exact three-block shape:
+
+  ┌─ BLOCK 1: appId header (one line)
+  │  appId: com.example.app
+  │
+  ├─ BLOCK 2: literal `---` separator on its own line
+  │  ---
+  │
+  └─ BLOCK 3: each command as a YAML list item starting with `- `
+
+GOOD output (this is what you must produce):
+
+  ```yaml
   appId: com.example.app
   ---
   - launchApp
@@ -320,10 +334,42 @@ Framework-specific hard requirements:
   - assertVisible: "Welcome"
   ```
 
-- Every command after `---` MUST be a YAML list item starting with `- `.
-- Commands NEVER appear bare (e.g. `launchApp` on its own line is INVALID — it must be `- launchApp`).
-- String values containing spaces / punctuation MUST be quoted.
-- `runScript:` arguments must reference an actual local helper file path, not a placeholder.
+BAD output #1 (missing list-item prefix — `maestro check-syntax` will reject):
+
+  ```yaml
+  appId: com.example.app
+  launchApp                  # ← BAD: bare command, no `- ` prefix
+  tapOn: Sign In             # ← BAD: bare command
+  ```
+
+BAD output #2 (missing `---` separator — Maestro's parser thinks every
+command is part of the appId document and fails):
+
+  ```yaml
+  appId: com.example.app
+  - launchApp                # ← BAD: no separator between header and steps
+  - tapOn: "Sign In"
+  ```
+
+BAD output #3 (multiple test cases in one file — Maestro runs ONE flow per
+file; concatenating leaves state from the previous run):
+
+  ```yaml
+  appId: com.example.app
+  ---
+  # --- TC-001 ---
+  - launchApp
+  ...
+  # --- TC-002 ---
+  - launchApp                # ← BAD: split into a SECOND file instead
+  ...
+  ```
+
+Other Maestro rules:
+- String values containing spaces or punctuation MUST be quoted.
+- `runScript:` arguments must reference an actual local helper file path,
+  not a placeholder like "selectImage(\"5MB_image_path\")".
+- Commands NEVER appear bare anywhere in the file.
 
 ## xcuitest
 - Swift, MUST `import XCTest`, MUST define a `class XYZ: XCTestCase`.
