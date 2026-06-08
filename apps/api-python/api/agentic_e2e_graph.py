@@ -736,8 +736,123 @@ def route_after_review(state: E2ECodegenState) -> str:
     if not errors:
         return "narrate"
     if state.get("repair_attempts", 0) >= MAX_REPAIRS:
+        # LLM didn't converge after MAX_REPAIRS attempts. Try a deterministic
+        # rescue pass for Maestro (the framework where the LLM persistently
+        # produces bare commands / missing separators). If the rescue succeeds,
+        # the file becomes well-formed and we proceed to narration.
+        if state.get("framework") == "maestro":
+            files = state.get("candidate_files") or []
+            fixed_any = False
+            for f in files:
+                corrected, changes = _autocorrect_maestro_yaml(f.get("content", ""))
+                if changes:
+                    f["content"] = corrected
+                    f.setdefault("metadata", {})
+                    fixed_any = True
+                    logger.info("Maestro autocorrect on %s: %s", f.get("path"), changes)
+            if fixed_any:
+                state["candidate_files"] = files  # type: ignore[typeddict-item]
+                # Re-run lint once after rescue so we know whether to flag.
+                rescued_issues = []
+                for f in files:
+                    rescued_issues.extend(_lint_one(f, "maestro"))
+                state["review_issues"] = rescued_issues  # type: ignore[typeddict-item]
+                state["_autocorrected"] = True  # type: ignore[typeddict-unknown-key]
         return "narrate"
     return "repair"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Deterministic Maestro YAML rescue — last-resort safety net.
+#
+# When MAX_REPAIRS is exhausted on the Maestro generator (which empirically
+# happens with gpt-4o-mini's stubborn bare-command shape), this function
+# applies three structural corrections so `maestro check-syntax` will accept
+# the file. It is NOT meant as a primary correction path — the LLM should
+# get it right. This exists so a single LLM regression doesn't block the
+# entire PR auto-open flow.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+_MAESTRO_COMMANDS_RE = re.compile(
+    r"^("
+    r"launchApp|tapOn|inputText|assertVisible|assertNotVisible|"
+    r"swipe|scroll|scrollUntilVisible|"
+    r"waitForAnimationToEnd|hideKeyboard|pressKey|takeScreenshot|"
+    r"copyTextFrom|runScript|extendedWaitUntil|repeat|back|"
+    r"openLink|stopApp|clearState|clearKeychain|killApp"
+    r")\b",
+    flags=re.MULTILINE,
+)
+
+
+def _autocorrect_maestro_yaml(content: str) -> tuple[str, list[str]]:
+    """Apply structural corrections to a malformed Maestro YAML.
+
+    Returns ``(corrected_content, changes_applied)``. Empty list means
+    nothing needed fixing.
+
+    Corrections (in order):
+      1. Strip leading JiraQA marker comment + blank lines so we operate on
+         the LLM body only — re-prepended at the end so provenance stays.
+      2. Insert ``---`` separator after the ``appId:`` line if absent.
+      3. Prefix bare Maestro commands at column 0 with ``- ``.
+    """
+    changes: list[str] = []
+    lines = content.splitlines()
+
+    # 1. Peel off marker + blank lines.
+    marker_lines: list[str] = []
+    while lines and (
+        lines[0].strip().startswith("#") or lines[0].strip() == ""
+    ):
+        marker_lines.append(lines.pop(0))
+
+    if not lines:
+        return content, []
+
+    # Find appId line index.
+    appid_idx = None
+    for i, ln in enumerate(lines):
+        if re.match(r"^\s*appId\s*:", ln):
+            appid_idx = i
+            break
+
+    if appid_idx is None:
+        return content, []  # nothing we can do without an anchor
+
+    # 2. Ensure --- separator immediately after the appId line (allow one blank).
+    has_separator = any(re.match(r"^---\s*$", ln) for ln in lines)
+    if not has_separator:
+        insert_at = appid_idx + 1
+        # Skip blank line if any directly after appId.
+        if insert_at < len(lines) and lines[insert_at].strip() == "":
+            lines.insert(insert_at + 1, "---")
+        else:
+            lines.insert(insert_at, "")
+            lines.insert(insert_at + 1, "---")
+        changes.append("inserted_separator")
+
+    # 3. Prefix bare Maestro commands AFTER the separator with `- `.
+    sep_idx = next(
+        (i for i, ln in enumerate(lines) if re.match(r"^---\s*$", ln)),
+        appid_idx + 1,
+    )
+    bare_fixed = 0
+    for i in range(sep_idx + 1, len(lines)):
+        if _MAESTRO_COMMANDS_RE.match(lines[i]):
+            lines[i] = "- " + lines[i]
+            bare_fixed += 1
+    if bare_fixed:
+        changes.append(f"prefixed_{bare_fixed}_bare_commands")
+
+    if not changes:
+        return content, []
+
+    rebuilt = "\n".join(marker_lines + lines)
+    if not rebuilt.endswith("\n"):
+        rebuilt += "\n"
+    return rebuilt, changes
 
 
 def repair_prep_node(state: E2ECodegenState) -> E2ECodegenState:
@@ -861,6 +976,7 @@ def finalize_node(state: E2ECodegenState) -> E2ECodegenState:
         "house_style": state.get("house_style", {}),
         "review_issues": list(state.get("review_issues") or []),
         "repair_attempts": state.get("repair_attempts", 0),
+        "autocorrected": bool(state.get("_autocorrected")),  # type: ignore[typeddict-item]
         "pr_title": state.get("pr_title", _fallback_title(state["ticket"])),
         "pr_description": state.get("pr_description")
         or _fallback_description(state, state.get("candidate_files") or []),

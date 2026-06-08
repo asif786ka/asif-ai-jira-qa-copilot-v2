@@ -214,6 +214,47 @@ async def test_e2e_repair_loop(monkeypatch):
     assert all("appId:" in f["content"] for f in result["files"])
 
 
+def test_maestro_autocorrect_inserts_separator_and_prefixes_bare_commands():
+    """Last-resort rescue when the LLM persistently produces bare commands."""
+    broken = (
+        "# jiraqa: generated v1 · ticket KAN-1\n"
+        "appId: com.example.app\n"
+        "\n"
+        "# --- TC-001 ---\n"
+        "launchApp\n"
+        'tapOn: "Sign In"\n'
+        'assertVisible: "Welcome"\n'
+    )
+    fixed, changes = ag._autocorrect_maestro_yaml(broken)
+    assert "inserted_separator" in changes
+    assert any(c.startswith("prefixed_") for c in changes)
+    # Marker preserved at the top.
+    assert fixed.startswith("# jiraqa: generated v1")
+    # Separator now present on its own line.
+    assert "\n---\n" in fixed
+    # All three commands now list items.
+    assert "- launchApp" in fixed
+    assert '- tapOn: "Sign In"' in fixed
+    assert '- assertVisible: "Welcome"' in fixed
+    # No stray bare-command lines remain.
+    for line in fixed.splitlines():
+        for cmd in ("launchApp", "tapOn:", "assertVisible:"):
+            if line.startswith(cmd):
+                pytest.fail(f"bare command remained: {line!r}")
+
+
+def test_maestro_autocorrect_noop_on_well_formed_yaml():
+    clean = (
+        "appId: com.example.app\n"
+        "---\n"
+        "- launchApp\n"
+        '- assertVisible: "Welcome"\n'
+    )
+    fixed, changes = ag._autocorrect_maestro_yaml(clean)
+    assert changes == []
+    assert fixed == clean
+
+
 @pytest.mark.asyncio
 async def test_e2e_unsupported_framework(monkeypatch):
     # Stub installed for safety, but the entry-point check rejects before any LLM call.
