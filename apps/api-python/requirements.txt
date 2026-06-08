@@ -1,5 +1,8 @@
 fastapi==0.115.4
-pydantic==2.9.2
+# pydantic loosened to >=2.9.2,<3.0 so langgraph / langchain-core (which want
+# >=2.10) can resolve alongside our older floor. FastAPI 0.115 supports the
+# full 2.x line. Tested through pydantic 2.10.x.
+pydantic>=2.9.2,<3.0
 httpx==0.27.2
 python-dotenv==1.0.1
 # Vercel uses Mangum-style ASGI handlers automatically; uvicorn for local dev.
