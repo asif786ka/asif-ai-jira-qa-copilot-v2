@@ -8,8 +8,8 @@ type Backend = "typescript" | "python";
 const STORAGE_KEY = "preferred-backend";
 
 const BACKENDS: Record<Backend, { label: string; tech: string; gradient: string }> = {
-  typescript: { label: "TypeScript", tech: "Next.js + Zod", gradient: "from-blue-400 to-cyan-300" },
-  python: { label: "Python", tech: "FastAPI + Pydantic", gradient: "from-yellow-300 to-orange-300" },
+  typescript: { label: "TypeScript", tech: "Next.js + Zod (single-shot)", gradient: "from-blue-400 to-cyan-300" },
+  python: { label: "Python", tech: "LangGraph multi-agent", gradient: "from-yellow-300 to-orange-300" },
 };
 
 export function BackendSwitcher() {

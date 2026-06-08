@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   JiraTicket,
   Platform,
@@ -12,6 +12,7 @@ import type {
   TicketValidationIssue,
   TicketValidationResult,
 } from "@jiraqa/core";
+import { validateTicketRulesOnly } from "@jiraqa/core";
 import {
   Loader2,
   Smartphone,
@@ -89,6 +90,15 @@ export function Wizard() {
   // non-blocking issues from the deterministic linter (e.g. missing edge tag).
   const [quality, setQuality] = useState<QualityScore | null>(null);
   const [lintWarnings, setLintWarnings] = useState<TicketValidationIssue[]>([]);
+
+  // Streaming progress — populated by SSE events from
+  // /pyapi/agentic-generate-stream. Empty when running the TS single-shot path.
+  const [progress, setProgress] = useState<{
+    pct: number;
+    stage: string;
+    message: string;
+    repairAttempts?: number;
+  } | null>(null);
   // When custom is active, override ticket + platform + screenshots from the form.
   const activeTicket: JiraTicket | null =
     source === "custom" ? customOutput?.ticket ?? null : ticket;
@@ -214,56 +224,73 @@ export function Wizard() {
       .catch(() => setConventions(null));
   }, [repoFullName, platform]);
 
-  // ── Validate ticket whenever the active one changes ─────────────────────
-  // Debounced via useEffect — every keystroke in the custom form re-fires
-  // this, so we wait 400ms before sending. We deliberately use the rules-only
-  // path (use_llm_rubric: false) for live validation: cheap, instant, no
-  // LLM cost. Users can still hit Generate, which runs the same rules
-  // server-side as a safety net.
+  // ── Three-tier validation ───────────────────────────────────────────────
+  // Tier 1 (instant, client-side, zero network): deterministic rules from
+  //         @jiraqa/core run on every change of the active ticket via a
+  //         pure `useMemo`. Same rules as the server — single source of
+  //         truth lives in packages/core/src/validation.ts.
+  // Tier 2 (opt-in, server, deterministic): the user can request a server
+  //         re-check via the "Check on server" button below. Useful when a
+  //         dev is iterating on the rule set and wants to confirm parity.
+  // Tier 3 (on Generate click): the LLM rubric. Runs as part of the
+  //         /agentic-generate readiness agent, never on edit. Zero LLM
+  //         cost while the user is still filling the form.
+  //
+  // Removing the on-edit /api/validate-ticket round-trip cuts ~5–8 network
+  // calls per ticket and eliminates server load proportional to typing speed.
   useEffect(() => {
-    if (!activeTicket) {
-      setValidation(null);
-      setValidating(false);
-      return;
-    }
-    const ticketSnapshot = activeTicket;
-    const platformSnapshot = activePlatform;
+    // Drop the server-fetched verdict on every ticket change — a stale
+    // server "passed" must never mask a fresh local failure.
+    setValidation(null);
+    setValidating(false);
+  }, [activeTicket]);
+
+  const liveValidation = useMemo<TicketValidationResult | null>(() => {
+    if (!activeTicket) return null;
+    return validateTicketRulesOnly(activeTicket);
+  }, [activeTicket]);
+
+  // The visible validation prefers the latest server result (if the user
+  // explicitly ran one), otherwise the local result. They are produced by
+  // the same rule set so divergence should be impossible — the precedence
+  // only matters when the server response also carries a rubric verdict.
+  const effectiveValidation: TicketValidationResult | null =
+    validation ?? liveValidation;
+
+  // ── Optional server re-check (Tier 2, opt-in) ───────────────────────────
+  async function recheckOnServer(opts: { withRubric: boolean }) {
+    if (!activeTicket) return;
     setValidating(true);
-    const handle = setTimeout(async () => {
-      try {
-        const res = await fetch("/api/validate-ticket", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            ticket: ticketSnapshot,
-            platform: platformSnapshot,
-            use_llm_rubric: false,
-          }),
-        });
-        const data = (await res.json()) as TicketValidationResult & {
-          error?: string;
-        };
-        if (data && typeof data.passed === "boolean") {
-          setValidation(data);
-        }
-      } catch {
-        // Network blip — leave the last known result so we don't flap.
-      } finally {
-        setValidating(false);
+    try {
+      const res = await fetch("/api/validate-ticket", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ticket: activeTicket,
+          platform: activePlatform,
+          use_llm_rubric: opts.withRubric,
+        }),
+      });
+      const data = (await res.json()) as TicketValidationResult & {
+        error?: string;
+      };
+      if (data && typeof data.passed === "boolean") {
+        setValidation(data);
       }
-    }, 400);
-    return () => {
-      clearTimeout(handle);
+    } catch {
+      // Network blip — leave the last known result so we don't flap.
+    } finally {
       setValidating(false);
-    };
-  }, [activeTicket, activePlatform]);
+    }
+  }
 
   // ── Generate ────────────────────────────────────────────────────────────
   async function generate() {
     if (!activeTicket) return;
     // Hard block at the UI layer too. The server still gates with 422,
-    // but no point firing a request we know will be rejected.
-    if (validation && !validation.passed) {
+    // but no point firing a request we know will be rejected. Use the
+    // effective validation (server result if available, else local rules).
+    if (effectiveValidation && !effectiveValidation.passed) {
       setError("Ticket failed QA-readiness checks — fix the issues listed above.");
       return;
     }
@@ -274,22 +301,112 @@ export function Wizard() {
     setBackendUsed("");
     setQuality(null);
     setLintWarnings([]);
+    setProgress(null);
     try {
       const backend = getActiveBackend();
-      const endpoint = backend === "python" ? "/pyapi/generate" : "/api/generate";
+      // TypeScript backend → single-shot /api/generate (JSON).
+      // Python backend → /pyapi/agentic-generate-stream (server-sent events)
+      // so the UI shows a real progress bar driven by LangGraph's astream.
+      //
+      // In LOCAL DEV we bypass the Next.js rewrite for the Python backend
+      // and call FastAPI directly on :5001. The dev proxy aborts long-
+      // running requests with ECONNRESET. Same-origin in production.
+      const isDev =
+        typeof process !== "undefined" &&
+        process.env.NODE_ENV !== "production";
+      const pythonStreamUrl = isDev
+        ? "http://localhost:5001/pyapi/agentic-generate-stream"
+        : "/pyapi/agentic-generate-stream";
+
+      const requestBody = JSON.stringify({
+        ticket: activeTicket,
+        platform: activePlatform,
+        repo_context: repoContext ?? undefined,
+        count_hint: 5,
+        screenshots: activeScreenshots,
+        judge: true,
+      });
+
+      // ── Python path: parse SSE events into progress + final result ───
+      if (backend === "python") {
+        const sseRes = await fetch(pythonStreamUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "text/event-stream" },
+          body: requestBody,
+        });
+        if (!sseRes.ok || !sseRes.body) {
+          throw new Error(`Stream request failed (HTTP ${sseRes.status})`);
+        }
+        const reader = sseRes.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let final: Record<string, unknown> | null = null;
+
+        outer: while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          // SSE frames are separated by a blank line.
+          let idx;
+          while ((idx = buffer.indexOf("\n\n")) !== -1) {
+            const frame = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            let event = "message";
+            let dataStr = "";
+            for (const line of frame.split("\n")) {
+              if (line.startsWith("event:")) event = line.slice(6).trim();
+              else if (line.startsWith("data:")) dataStr += line.slice(5).trim();
+            }
+            if (!dataStr) continue;
+            let payload: Record<string, unknown>;
+            try {
+              payload = JSON.parse(dataStr);
+            } catch {
+              continue;
+            }
+            if (event === "progress") {
+              setProgress({
+                pct: Number(payload.pct ?? 0),
+                stage: String(payload.stage ?? ""),
+                message: String(payload.message ?? ""),
+                repairAttempts:
+                  typeof payload.repair_attempts === "number"
+                    ? payload.repair_attempts
+                    : undefined,
+              });
+            } else if (event === "result") {
+              final = payload;
+              break outer;
+            }
+          }
+        }
+
+        if (!final) throw new Error("Stream ended without a final result");
+        // Map the streamed result the same way as the JSON path below.
+        const data = final as Record<string, unknown>;
+        if (data.code === "ticket_validation_failed" && data.validation) {
+          setValidation(data.validation as TicketValidationResult);
+          throw new Error((data.error as string) ?? "Ticket failed validation");
+        }
+        if (data.error) {
+          throw new Error(String(data.error));
+        }
+        setResults((data.generated_test_cases as TestCase[]) ?? []);
+        setProviderUsed((data.provider as string) ?? "");
+        setBackendUsed((data.backend as string) ?? backend);
+        if (data.quality) setQuality(data.quality as QualityScore);
+        if (Array.isArray(data.lint_warnings)) {
+          setLintWarnings(data.lint_warnings as TicketValidationIssue[]);
+        }
+        return;
+      }
+
+      // ── TypeScript path: original single-shot JSON request ───────────
+      const endpoint = "/api/generate";
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          ticket: activeTicket,
-          platform: activePlatform,
-          repo_context: repoContext ?? undefined,
-          count_hint: 5,
-          screenshots: activeScreenshots,
-          // Layer 2 — request the LLM-as-judge quality score. The server may
-          // silently skip it if no provider is configured.
-          judge: true,
-        }),
+        body: requestBody,
       });
       const data = await res.json();
       if (!res.ok) {
@@ -332,14 +449,26 @@ export function Wizard() {
       setError((e as Error).message);
     } finally {
       setGenerating(false);
+      setProgress(null);
     }
   }
 
   // ── Phase 11.7 — Create the E2E PR ──────────────────────────────────────
   async function createE2EPr() {
-    if (!ticket || !results || !repoFullName) return;
+    // Use the ACTIVE ticket — works for both the Jira and Custom-scenario
+    // sources. Previously this only saw the Jira-flow `ticket` state, so
+    // clicking "Generate E2E PR" from a Custom-scenario run was a silent no-op.
+    if (!activeTicket || !results || !repoFullName) {
+      setPrError(
+        "Cannot create PR — need a ticket, generated test cases, and a selected GitHub repo.",
+      );
+      return;
+    }
     const [owner, repo] = repoFullName.split("/");
-    if (!owner || !repo) return;
+    if (!owner || !repo) {
+      setPrError(`Could not parse repo owner/name from "${repoFullName}".`);
+      return;
+    }
     setCreatingPr(true);
     setPrError(null);
     setPrResult(null);
@@ -348,7 +477,7 @@ export function Wizard() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          ticket,
+          ticket: activeTicket,
           test_cases: results,
           main_owner: owner,
           main_repo: repo,
@@ -600,10 +729,36 @@ export function Wizard() {
       <div className="lg:col-span-4 space-y-3">
         <h2 className="text-sm font-semibold text-gray-300">3. Generate</h2>
         <div className="card space-y-3">
-          {/* QA-readiness panel — visible whenever a ticket is loaded.
-              Failed validation also disables the Generate button below. */}
+          {/* QA-readiness panel — runs the deterministic rules instantly
+              on the client (Tier 1). No network call on edits. Server
+              re-check is a button below, LLM rubric runs only on Generate. */}
           {activeTicket && (
-            <TicketValidationPanel result={validation} loading={validating} />
+            <TicketValidationPanel
+              result={effectiveValidation}
+              loading={validating}
+            />
+          )}
+          {activeTicket && (
+            <div className="flex gap-2 text-xs">
+              <button
+                type="button"
+                className="btn-secondary flex-1"
+                onClick={() => recheckOnServer({ withRubric: false })}
+                disabled={validating}
+                title="Re-run the same deterministic rules on the server. Free, ~10 ms."
+              >
+                {validating ? "Checking..." : "Check on server"}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary flex-1"
+                onClick={() => recheckOnServer({ withRubric: true })}
+                disabled={validating}
+                title="Run the LLM rubric for a semantic 'is this testable?' score. Costs one LLM call."
+              >
+                {validating ? "Scoring..." : "Run AI rubric"}
+              </button>
+            </div>
           )}
           <button
             className="btn-primary w-full"
@@ -612,19 +767,44 @@ export function Wizard() {
               !activeTicket ||
               generating ||
               validating ||
-              (validation !== null && !validation.passed)
+              (effectiveValidation !== null && !effectiveValidation.passed)
             }
           >
             {generating ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" /> Generating...
-              </>
-            ) : validation && !validation.passed ? (
+              <span className="flex items-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                {progress
+                  ? `${progress.message}… ${progress.pct}%`
+                  : "Generating…"}
+              </span>
+            ) : effectiveValidation && !effectiveValidation.passed ? (
               "Fix ticket to generate"
             ) : (
               "Generate test cases"
             )}
           </button>
+          {/* Real progress bar driven by LangGraph astream events. Only
+              renders for the Python multi-agent backend; the TS single-shot
+              path leaves `progress` null. */}
+          {generating && progress && (
+            <div className="space-y-1">
+              <div className="h-1.5 w-full rounded bg-white/5 overflow-hidden">
+                <div
+                  className="h-full bg-accent transition-[width] duration-300 ease-out"
+                  style={{ width: `${Math.max(2, Math.min(100, progress.pct))}%` }}
+                />
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-gray-400">
+                <span className="font-mono">
+                  {progress.stage}
+                  {progress.repairAttempts && progress.repairAttempts > 0
+                    ? ` · repair ${progress.repairAttempts}`
+                    : ""}
+                </span>
+                <span>{progress.pct}%</span>
+              </div>
+            </div>
+          )}
           {error && error.trim() !== "" && (
             <div className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-lg p-3">
               {error}
@@ -727,8 +907,10 @@ export function Wizard() {
             <h2 className="text-sm font-semibold text-gray-300">
               Generated test cases ({results.length})
             </h2>
-            {/* Phase 11.7 — E2E PR button */}
-            {conventions && (platform === "ios" || platform === "android") && (
+            {/* Phase 11.7 — E2E PR button. Uses activePlatform so it shows
+                up correctly when source = custom (where the platform is
+                read from customOutput rather than the wizard state). */}
+            {conventions && (activePlatform === "ios" || activePlatform === "android") && (
               <button
                 onClick={createE2EPr}
                 disabled={creatingPr}

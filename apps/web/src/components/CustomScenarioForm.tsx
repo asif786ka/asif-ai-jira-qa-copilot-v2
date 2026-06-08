@@ -62,14 +62,43 @@ export function CustomScenarioForm({ onChange }: Props) {
       .slice(0, 40);
     const ticketId =
       jiraLink.trim() || `CUSTOM-${titleSlug || Date.now().toString(36)}`;
-    const acceptance_criteria = preconditions
+
+    // Acceptance criteria — one per line of "Expected behaviour".
+    // That field is where users write the testable outcomes; preconditions
+    // are *setup state*, not assertions. (Pre-fix this mapping was inverted
+    // which made the validator complain when the user actually had
+    // perfectly testable Expected lines.)
+    const acceptance_criteria = expected
       .split("\n")
       .map((s) => s.trim())
       .filter(Boolean);
+
+    // Description — compose every textarea the user filled so the LLM
+    // (and the >=30-char rule) sees the full picture. Falls back to just
+    // the Expected text when nothing else is filled.
+    const preconditionsList = preconditions
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const descriptionParts: string[] = [];
+    if (expected.trim()) {
+      descriptionParts.push(`Expected behaviour:\n${expected.trim()}`);
+    }
+    if (preconditionsList.length > 0) {
+      descriptionParts.push(
+        `Preconditions:\n${preconditionsList.map((p) => `- ${p}`).join("\n")}`,
+      );
+    }
+    if (description.trim()) {
+      descriptionParts.push(`Additional context:\n${description.trim()}`);
+    }
+    const composedDescription =
+      descriptionParts.join("\n\n") || expected.trim();
+
     const ticket: JiraTicket = {
       ticket_id: ticketId,
       summary: title.trim(),
-      description: description.trim() || expected.trim(),
+      description: composedDescription,
       acceptance_criteria,
       issue_type: "story",
       priority: "medium",
@@ -177,14 +206,21 @@ export function CustomScenarioForm({ onChange }: Props) {
 
       <div>
         <label className="text-xs text-gray-400">
-          Expected behaviour <span className="text-red-400">*</span>
+          Expected behaviour <span className="text-red-400">*</span>{" "}
+          <span className="text-gray-500">
+            (one acceptance criterion per line — need at least 2)
+          </span>
         </label>
         <textarea
-          className="input mt-1"
-          rows={4}
+          className="input mt-1 font-mono text-[12px]"
+          rows={5}
           value={expected}
           onChange={(e) => setExpected(e.target.value)}
-          placeholder="When the user taps Upload with a 10 MB image, the app rejects it and shows 'File too large, max 5 MB'. The user returns to the previous screen after tapping OK."
+          placeholder={
+            "When the user taps Upload with a 10 MB image, the app rejects it and shows 'File too large, max 5 MB' within 1s.\n" +
+            "When the user taps OK on the error dialog, focus returns to the Upload button.\n" +
+            "When the user is offline and taps Upload, no network request is made and an inline 'No internet' error appears."
+          }
         />
       </div>
 

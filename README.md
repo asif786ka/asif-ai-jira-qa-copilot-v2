@@ -57,6 +57,44 @@ After `./run-dev.sh` shows `✓ Ready` and you open http://localhost:3000:
 
 The header has two toggles that change runtime behaviour without re-deploying: provider (OpenAI ↔ Gemini) and backend (TypeScript ↔ Python).
 
+## Agentic SDLC pipeline (multi-agent LangGraph)
+
+`/pyapi/generate` is the single-LLM-call path. `/pyapi/agentic-generate` is the **multi-agent SDLC pipeline** — five specialised agents coordinating through a LangGraph state machine. Same request shape, richer behaviour.
+
+The five agents:
+
+1. **Readiness agent** — gates the pipeline on ticket quality (deterministic rules + LLM rubric). Short-circuits with 422 before any spend on a bad ticket.
+2. **Requirements agent** — the "BA" agent. Extracts structured testable requirements (primary behaviour, happy paths, negative paths, edge cases, non-functional touchpoints, out-of-scope) from the ticket prose.
+3. **Test generator agent** — produces the TestCase batch, grounded in BOTH the ticket and the extracted requirements. Reuses the existing prompt builder and provider interface.
+4. **Quality reviewer agent** — runs the deterministic R1–R5 linter. On error, routes back to the generator with structured repair guidance. Loop bounded by `MAX_REPAIRS` to cap token spend.
+5. **Scorer agent** — cross-family LLM-as-judge. Pure enrichment; never blocks output. Surfaces a numeric quality score + per-case flags.
+
+```
+[ readiness ] --pass--> [ requirements ] -> [ generator ] -> [ reviewer ]
+      | fail                                       ^             |
+      v                                            +-- repair <--+
+   422 out                                                       |
+                                                                 v
+                                                            [ scorer ]
+                                                                 |
+                                                                 v
+                                                              payload
+```
+
+The implementation lives in `apps/api-python/api/agentic_graph.py`. Each agent is a node; the repair loop is a conditional edge that bumps `repair_attempts` and feeds structured reviewer feedback into the next generation prompt. State is a `TypedDict` so agents only see what upstream agents have populated.
+
+Run the new path:
+
+```bash
+curl -sX POST http://localhost:3000/pyapi/agentic-generate \
+  -H 'Content-Type: application/json' \
+  -d @sample-ticket.json | jq .
+```
+
+Why this matters for an AI-DLC review: every artefact is auditable. The response includes `requirements` (the BA agent's structured artefact), `repair_attempts` (how many regenerations were needed), `lint_warnings` (R1–R5 issues, even when not blocking), and `quality` (the judge's verdict + per-case flags). All of it is grounded in the original Jira ticket key, so an auditor can trace an AI-generated test back to the requirement it came from.
+
+Tests for the graph live in `apps/api-python/tests/test_agentic_graph.py` — happy path, repair loop, and readiness short-circuit.
+
 ## Architecture
 
 ```

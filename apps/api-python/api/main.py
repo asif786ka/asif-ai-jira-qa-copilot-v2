@@ -15,11 +15,35 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
+
+# Load .env files BEFORE any provider import — otherwise the LLM provider
+# constructors run with an empty environment in local dev. We look in three
+# locations (first hit wins): apps/api-python/.env, repo-root/.env.local,
+# apps/web/.env.local. The Next.js side already loads apps/web/.env.local
+# automatically; this just teaches the Python sidecar to do the same so
+# both processes share one source of truth.
+try:
+    from dotenv import load_dotenv
+
+    _HERE = Path(__file__).resolve().parent
+    for _candidate in (
+        _HERE.parent / ".env",                          # apps/api-python/.env
+        _HERE.parent.parent.parent / ".env.local",      # repo root .env.local
+        _HERE.parent.parent / "web" / ".env.local",     # apps/web/.env.local
+    ):
+        if _candidate.is_file():
+            load_dotenv(_candidate, override=False)
+except Exception:
+    # python-dotenv is in requirements.txt, but we never want a missing
+    # .env file or import to crash boot — the explicit RuntimeError from
+    # the provider is a clearer signal to the user.
+    pass
 
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from .llm import (
@@ -33,6 +57,8 @@ from .models import (
     GenerateResponse,
     ValidateTicketRequest,
 )
+from .agentic_e2e_graph import run_e2e_codegen_pipeline
+from .agentic_graph import run_agentic_pipeline, run_agentic_pipeline_stream
 from .judge import judge_generated_cases
 from .output_validation import errors_only, lint_generated_cases
 from .prompt import build_system_prompt, build_user_prompt
@@ -241,6 +267,182 @@ async def generate(payload: dict[str, Any]) -> JSONResponse:
         payload["quality"] = quality.model_dump(mode="json")
 
     return JSONResponse(content=payload)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Agentic SDLC pipeline — multi-agent LangGraph workflow.
+# Same request shape as /generate, but the graph runs five specialised
+# agents: readiness → requirements → generator → reviewer → scorer, with a
+# bounded repair loop between reviewer and generator. See agentic_graph.py
+# for the full state machine.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@router.post("/agentic-generate")
+async def agentic_generate(payload: dict[str, Any]) -> JSONResponse:
+    try:
+        req = GenerateRequest(**payload)
+    except ValidationError as e:
+        return JSONResponse(
+            status_code=400,
+            content=ErrorResponse(
+                error="Invalid request body", details=e.json()
+            ).model_dump(mode="json"),
+        )
+
+    try:
+        result = await run_agentic_pipeline(
+            req.ticket,
+            req.platform,
+            repo_context=req.repo_context,
+            provider=req.provider,
+            count_hint=req.count_hint,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Agentic pipeline crashed")
+        return JSONResponse(
+            status_code=500,
+            content=ErrorResponse(
+                error=f"Agentic pipeline failed: {e}"
+            ).model_dump(mode="json"),
+        )
+
+    # Map terminal-error payloads to the right HTTP status. Readiness
+    # failures stay 422 (same as /generate) so existing UI handlers work.
+    code = result.get("code") or ""
+    if code == "ticket_validation_failed":
+        return JSONResponse(status_code=422, content=result)
+    if code in {"agentic_pipeline_failed", "agentic_pipeline_empty"}:
+        return JSONResponse(status_code=500, content=result)
+
+    return JSONResponse(content=result)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Streaming variant — server-sent events driven by LangGraph's astream.
+# The wizard subscribes and renders a real progress bar with stage labels
+# (no fake timer). One terminal event ("result") carries the final payload
+# so the client never needs a second round-trip.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@router.post("/agentic-generate-stream")
+async def agentic_generate_stream(payload: dict[str, Any]):
+    try:
+        req = GenerateRequest(**payload)
+    except ValidationError as e:
+        return JSONResponse(
+            status_code=400,
+            content=ErrorResponse(
+                error="Invalid request body", details=e.json()
+            ).model_dump(mode="json"),
+        )
+
+    async def event_source():
+        try:
+            async for event_name, data in run_agentic_pipeline_stream(
+                req.ticket,
+                req.platform,
+                repo_context=req.repo_context,
+                provider=req.provider,
+                count_hint=req.count_hint,
+            ):
+                yield f"event: {event_name}\ndata: {json.dumps(data)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Stream pipeline crashed")
+            yield (
+                "event: result\n"
+                f"data: {json.dumps({'error': str(e), 'code': 'agentic_pipeline_failed'})}\n\n"
+            )
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            # Disable any buffering proxies in between (nginx etc).
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Agentic E2E PR codegen — second multi-agent stage. The TS orchestrator at
+# /api/e2e/generate-pr calls this for the LLM-heavy code synthesis +
+# convention-conformance + PR narration. All GitHub I/O stays in TS.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@router.post("/agentic-e2e-codegen")
+async def agentic_e2e_codegen(payload: dict[str, Any]) -> JSONResponse:
+    try:
+        ticket = JiraTicket(**(payload.get("ticket") or {}))
+    except ValidationError as e:
+        return JSONResponse(
+            status_code=400,
+            content=ErrorResponse(
+                error="Invalid ticket in request body", details=e.json()
+            ).model_dump(mode="json"),
+        )
+
+    raw_cases = payload.get("test_cases") or []
+    try:
+        from .models import TestCase
+        cases = [TestCase(**c) if not isinstance(c, TestCase) else c for c in raw_cases]
+    except ValidationError as e:
+        return JSONResponse(
+            status_code=400,
+            content=ErrorResponse(
+                error="Invalid test_cases in request body", details=e.json()
+            ).model_dump(mode="json"),
+        )
+
+    platform_raw = payload.get("platform")
+    try:
+        from .models import Platform as PlatformEnum
+        platform = PlatformEnum(platform_raw)
+    except Exception:  # noqa: BLE001
+        return JSONResponse(
+            status_code=400,
+            content=ErrorResponse(
+                error=f"Invalid platform '{platform_raw}' — expected one of ios/android/web"
+            ).model_dump(mode="json"),
+        )
+
+    framework = payload.get("framework") or ""
+    existing_excerpts = payload.get("existing_test_excerpts") or []
+    e2e_repo_name = payload.get("e2e_repo_name") or ""
+    main_repo = payload.get("main_repo") or ""
+    provider = payload.get("provider")
+
+    try:
+        result = await run_e2e_codegen_pipeline(
+            ticket,
+            cases,
+            platform,
+            framework,
+            existing_test_excerpts=existing_excerpts,
+            e2e_repo_name=e2e_repo_name,
+            main_repo=main_repo,
+            provider=provider,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Agentic E2E codegen crashed")
+        return JSONResponse(
+            status_code=500,
+            content=ErrorResponse(
+                error=f"Agentic E2E codegen failed: {e}"
+            ).model_dump(mode="json"),
+        )
+
+    code = result.get("code") or ""
+    if code == "unsupported_framework":
+        return JSONResponse(status_code=400, content=result)
+    if code == "agentic_e2e_failed" or code == "agentic_e2e_empty":
+        return JSONResponse(status_code=500, content=result)
+
+    return JSONResponse(content=result)
 
 
 app.include_router(router)

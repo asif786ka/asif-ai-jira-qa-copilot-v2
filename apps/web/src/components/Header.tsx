@@ -39,6 +39,12 @@ export function Header() {
           >
             DORA
           </Link>
+          <Link
+            href="/runs"
+            className="text-xs px-3 py-1.5 rounded-lg border border-border bg-bg-panel hover:bg-white/5"
+          >
+            Runs
+          </Link>
           <ProviderSwitcher />
           <BackendSwitcher />
         </nav>

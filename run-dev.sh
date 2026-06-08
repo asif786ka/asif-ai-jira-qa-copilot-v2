@@ -31,7 +31,29 @@ if (( NODE_MAJOR < 20 )); then
   err "Node $NODE_MAJOR detected. Need Node 20+. Try: nvm install 20"
   exit 1
 fi
-echo -e "  ${DIM}node $(node -v), pnpm $(pnpm -v), python $(python3 -V | awk '{print $2}')${RESET}"
+
+# Pick a Python interpreter that satisfies the codebase's 3.10+ syntax
+# (str | None unions, etc). Prefers python3.12, falls back to 3.11, then 3.10.
+# If only python3.9 is on PATH, fail with a clear message rather than letting
+# uvicorn crash deep inside Pydantic.
+PY_BIN=""
+for cand in python3.12 python3.11 python3.10 python3; do
+  if command -v "$cand" >/dev/null; then
+    VER=$("$cand" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)
+    MAJOR=${VER%.*}; MINOR=${VER#*.}
+    if [ "$MAJOR" = "3" ] && [ "$MINOR" -ge 10 ] 2>/dev/null; then
+      PY_BIN="$cand"
+      break
+    fi
+  fi
+done
+if [ -z "$PY_BIN" ]; then
+  err "Need Python 3.10+ (3.12 recommended). On macOS: brew install python@3.12, then 'brew link python@3.12'."
+  err "Detected: $(python3 -V 2>&1)"
+  exit 1
+fi
+export PY_BIN
+echo -e "  ${DIM}node $(node -v), pnpm $(pnpm -v), python $($PY_BIN -V | awk '{print $2}') ($PY_BIN)${RESET}"
 
 # ─── 2. .env.local bootstrap ────────────────────────────────────────────────
 ENV_LOCAL="apps/web/.env.local"
@@ -88,11 +110,26 @@ else
   echo -e "  ${DIM}JS deps up to date — skipping install${RESET}"
 fi
 
-# ─── 4. Python deps ─────────────────────────────────────────────────────────
+# ─── 4. Python deps (inside a project venv, PEP 668 compliant) ──────────────
+# Homebrew Python 3.12+ refuses system-wide pip installs, so we keep a
+# dedicated virtualenv at apps/api-python/.venv. First run creates it; later
+# runs reuse it. The venv's interpreter becomes the new $PY_BIN.
+#
+# NOTE: PY_BIN must be ABSOLUTE because the uvicorn block below does
+# `cd apps/api-python` first — a relative path would resolve against the
+# wrong cwd and silently fail with "No such file or directory".
+VENV_DIR="$(pwd)/apps/api-python/.venv"
+if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+  log "Creating Python venv at $VENV_DIR..."
+  "$PY_BIN" -m venv "$VENV_DIR"
+fi
+PY_BIN="$VENV_DIR/bin/python"
+
 PY_STAMP="apps/api-python/.install-stamp"
 if [[ ! -f "$PY_STAMP" ]] || [[ requirements.txt -nt "$PY_STAMP" ]]; then
-  log "Installing Python deps..."
-  python3 -m pip install -r requirements.txt --quiet --disable-pip-version-check
+  log "Installing Python deps into venv..."
+  "$PY_BIN" -m pip install --upgrade pip --quiet --disable-pip-version-check
+  "$PY_BIN" -m pip install -r requirements.txt --quiet --disable-pip-version-check
   touch "$PY_STAMP"
 else
   echo -e "  ${DIM}Python deps up to date — skipping install${RESET}"
@@ -115,10 +152,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# FastAPI sidecar
+# FastAPI sidecar — use the version-checked $PY_BIN, not bare python3.
+# Env loading is handled inside api/main.py via python-dotenv so the same
+# .env.local works for `./run-dev.sh`, `uvicorn …` and Vercel.
 (
   cd apps/api-python
-  exec python3 -m uvicorn api.main:app --host 0.0.0.0 --port 5001 --reload
+  exec "$PY_BIN" -m uvicorn api.main:app --host 0.0.0.0 --port 5001 --reload
 ) &
 PY_PID=$!
 
