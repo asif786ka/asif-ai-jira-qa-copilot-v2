@@ -445,4 +445,38 @@ async def agentic_e2e_codegen(payload: dict[str, Any]) -> JSONResponse:
     return JSONResponse(content=result)
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# RAG — bulk index a repo's test files. The TS orchestrator calls this
+# before /agentic-e2e-codegen so the ConventionScanner can retrieve
+# semantically similar tests via hybrid search (vector + keyword + RRF).
+#
+# Body: { "repo": "owner/repo", "files": [{"path", "content", "metadata?"}] }
+# Response: { "indexed": int }
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@router.post("/rag/index")
+async def rag_index(payload: dict[str, Any]) -> JSONResponse:
+    repo = str(payload.get("repo") or "").strip()
+    files = payload.get("files") or []
+    if not repo or not isinstance(files, list):
+        return JSONResponse(
+            status_code=400,
+            content=ErrorResponse(
+                error="`repo` (str) and `files` (list) are required."
+            ).model_dump(mode="json"),
+        )
+    try:
+        from .rag import index_repo_files
+
+        wrote = await index_repo_files(repo, files)
+        return JSONResponse(content={"indexed": wrote, "repo": repo})
+    except Exception as e:  # noqa: BLE001
+        logger.exception("RAG index failed")
+        return JSONResponse(
+            status_code=500,
+            content=ErrorResponse(error=f"RAG index failed: {e}").model_dump(mode="json"),
+        )
+
+
 app.include_router(router)

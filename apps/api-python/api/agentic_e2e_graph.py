@@ -194,13 +194,54 @@ def _excerpts_as_text(excerpts: list[dict]) -> str:
 
 async def convention_scanner_agent(state: E2ECodegenState) -> E2ECodegenState:
     llm = resolve_llm_provider(state.get("provider_name"))
+
+    # RAG step — if the e2e repo has been indexed, pull the test files most
+    # semantically + lexically similar to the ticket and prepend them to
+    # whatever excerpts the caller passed. The convention scanner then sees
+    # the most relevant examples, not just the random first-K from disk.
+    excerpts: list[dict] = list(state.get("existing_test_excerpts") or [])
+    e2e_repo = state.get("e2e_repo_name") or ""
+    if e2e_repo:
+        try:
+            from .rag import (
+                get_store,
+                hybrid_query,
+                resolve_embedding_provider,
+            )
+
+            store = get_store()
+            embedder = resolve_embedding_provider()
+            ticket = state["ticket"]
+            query_text = (
+                f"{ticket.summary}\n\n{ticket.description}\n\n"
+                + "\n".join(ticket.acceptance_criteria or [])
+            )
+            hits = await hybrid_query(
+                store, embedder, query_text, repo=e2e_repo, k_final=6,
+            )
+            rag_excerpts = [
+                {"path": h.path, "excerpt": h.content[:1500],
+                 "_rag_score": h.score}
+                for h in hits
+            ]
+            # Prepend RAG hits, dedupe by path against caller-supplied excerpts.
+            seen = {e.get("path") for e in rag_excerpts}
+            excerpts = rag_excerpts + [
+                e for e in excerpts if e.get("path") not in seen
+            ]
+            # Surface the retrieval info into state so the finalize step can
+            # report it to the caller (Langfuse / dashboard).
+            state["_rag_hits"] = hits  # type: ignore[typeddict-unknown-key]
+        except Exception as e:  # noqa: BLE001
+            logger.info("RAG retrieval skipped: %s", e)
+
     user = (
         f"Framework: {state.get('framework')}\n"
         f"Platform: {state.get('platform')}\n"
         f"Target E2E repo: {state.get('e2e_repo_name')}\n"
         f"Source main repo: {state.get('main_repo')}\n\n"
         "Existing test files in the E2E repo:\n"
-        + _excerpts_as_text(state.get("existing_test_excerpts") or [])
+        + _excerpts_as_text(excerpts)
     )
     try:
         resp = await llm.complete(
@@ -723,6 +764,30 @@ def finalize_node(state: E2ECodegenState) -> E2ECodegenState:
         "pr_description": state.get("pr_description")
         or _fallback_description(state, state.get("candidate_files") or []),
     }
+
+    # RAG observability — when convention_scanner_agent retrieved hits,
+    # compute a cheap faithfulness score: how many retrieved chunks the
+    # generated code actually grounded on (path leaf or key identifiers
+    # appear in the file content). Online metric only — surface for
+    # logging / dashboard. Offline RAGAS scoring lives separately.
+    rag_hits = state.get("_rag_hits")  # type: ignore[typeddict-item]
+    if rag_hits:
+        try:
+            from .rag import faithfulness_score
+
+            joined = "\n\n".join(
+                f.get("content", "") for f in payload["files"] if isinstance(f, dict)
+            )
+            payload["rag"] = {
+                "retrieved": [
+                    {"path": h.path, "score": h.score, "source": h.source}
+                    for h in rag_hits
+                ],
+                "faithfulness": faithfulness_score(joined, rag_hits),
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.info("Faithfulness scoring skipped: %s", e)
+
     if state.get("error"):
         payload["partial_error"] = state["error"]
     return {"final_payload": payload}
