@@ -94,11 +94,32 @@ async function runGeneratePr(req: Request) {
   // is unreachable (e.g. running TS-only in prod, or the Python sidecar
   // is down).
   const spec = buildCodeGenSpec(ticket, test_cases, conventions);
+  // Provider resolution order (most specific → least):
+  //   1. session.preferred_provider — the value the user picked in the
+  //      header toggle. Honour it so a "Switch to OpenAI" choice isn't
+  //      silently overridden by per-framework smart routing (which used
+  //      to send XCUITest to Gemini and hit 503s on outage days).
+  //   2. spec.recommendedProvider — the per-framework default from
+  //      buildCodeGenSpec (e.g. Gemini for XCUITest's longer context).
+  //   3. resolveLLMProvider() — the global default from the registry.
   let llm;
-  try {
-    const candidate = getLLMProvider(spec.recommendedProvider);
-    llm = candidate.isAvailable() ? candidate : resolveLLMProvider();
-  } catch {
+  const preferredOrder: Array<string | undefined> = [
+    session.preferred_provider,
+    spec.recommendedProvider,
+  ];
+  for (const name of preferredOrder) {
+    if (!name) continue;
+    try {
+      const candidate = getLLMProvider(name);
+      if (candidate.isAvailable()) {
+        llm = candidate;
+        break;
+      }
+    } catch {
+      // not registered — fall through
+    }
+  }
+  if (!llm) {
     try {
       llm = resolveLLMProvider();
     } catch (e) {

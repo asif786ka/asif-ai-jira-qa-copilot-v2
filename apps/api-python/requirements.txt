@@ -4,7 +4,16 @@ httpx==0.27.2
 python-dotenv==1.0.1
 # Vercel uses Mangum-style ASGI handlers automatically; uvicorn for local dev.
 uvicorn[standard]==0.32.0
+# Pin starlette to fastapi 0.115.4's compatible range. Newer MCP releases
+# transitively want starlette>=0.49, which breaks FastAPI 0.115. Keep the
+# old MCP + old starlette together until we bump FastAPI too.
+starlette>=0.40.0,<0.42.0
 # Agentic SDLC pipeline — multi-agent LangGraph workflow at /pyapi/agentic-generate.
 # Version pins kept loose for langchain-core to coexist with any global langchain install.
 langgraph>=0.2.59,<0.3
 langchain-core>=0.3.73,<0.4
+# MCP server — exposes the agentic pipelines as tools any MCP client
+# (Claude Code, Cursor, Windsurf, Claude Desktop) can invoke. Stdio transport.
+# Pinned to 1.2.x because newer 1.x releases require starlette>=0.49 which
+# conflicts with FastAPI 0.115.
+mcp==1.2.0
