@@ -153,6 +153,11 @@ class E2ECodegenState(TypedDict, total=False):
     pr_title: str
     pr_description: str
 
+    # ── Populated by autocorrect_node when MAX_REPAIRS exhausted on maestro.
+    # Declared on the TypedDict so LangGraph preserves it across nodes
+    # (unknown keys returned by a node may be silently dropped).
+    autocorrected: bool
+
     # ── Final
     final_payload: dict[str, Any]
     error: str
@@ -730,36 +735,70 @@ def _errors_only(issues: list[ReviewIssue]) -> list[ReviewIssue]:
 
 
 def route_after_review(state: E2ECodegenState) -> str:
+    """Pure routing decision — never mutate state from here.
+
+    Three destinations:
+      - "repair"     — has errors AND below MAX_REPAIRS
+      - "autocorrect"— has errors AND repair budget exhausted AND maestro
+                       (the deterministic rescue node fixes structural shape)
+      - "narrate"    — clean, OR exhausted on a framework without rescue
+    """
     if state.get("error"):
-        return "narrate"  # still narrate so the route gets a coherent payload
+        return "narrate"
     errors = _errors_only(state.get("review_issues") or [])
     if not errors:
         return "narrate"
     if state.get("repair_attempts", 0) >= MAX_REPAIRS:
-        # LLM didn't converge after MAX_REPAIRS attempts. Try a deterministic
-        # rescue pass for Maestro (the framework where the LLM persistently
-        # produces bare commands / missing separators). If the rescue succeeds,
-        # the file becomes well-formed and we proceed to narration.
         if state.get("framework") == "maestro":
-            files = state.get("candidate_files") or []
-            fixed_any = False
-            for f in files:
-                corrected, changes = _autocorrect_maestro_yaml(f.get("content", ""))
-                if changes:
-                    f["content"] = corrected
-                    f.setdefault("metadata", {})
-                    fixed_any = True
-                    logger.info("Maestro autocorrect on %s: %s", f.get("path"), changes)
-            if fixed_any:
-                state["candidate_files"] = files  # type: ignore[typeddict-item]
-                # Re-run lint once after rescue so we know whether to flag.
-                rescued_issues = []
-                for f in files:
-                    rescued_issues.extend(_lint_one(f, "maestro"))
-                state["review_issues"] = rescued_issues  # type: ignore[typeddict-item]
-                state["_autocorrected"] = True  # type: ignore[typeddict-unknown-key]
+            return "autocorrect"
         return "narrate"
     return "repair"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# autocorrect_node — deterministic LangGraph node that runs the Maestro YAML
+# rescue function over the candidate files. Reached only when the LLM has
+# exhausted MAX_REPAIRS and the framework is maestro. Re-runs the linter
+# after rescue so review_issues reflects the final state.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def autocorrect_node(state: E2ECodegenState) -> E2ECodegenState:
+    files = list(state.get("candidate_files") or [])
+    fixed_any = False
+    for f in files:
+        corrected, changes = _autocorrect_maestro_yaml(f.get("content", ""))
+        if changes:
+            f["content"] = corrected
+            fixed_any = True
+            logger.warning(
+                "MAESTRO AUTOCORRECT applied to %s: %s",
+                f.get("path"), changes,
+            )
+
+    if not fixed_any:
+        logger.warning(
+            "MAESTRO AUTOCORRECT entered but nothing to fix on %d file(s) "
+            "— this is unexpected; check the LLM output and bare-command regex.",
+            len(files),
+        )
+        return {}
+
+    # Re-lint so the response reflects the rescued state.
+    rescued_issues: list[ReviewIssue] = []
+    for f in files:
+        rescued_issues.extend(_lint_one(f, "maestro"))
+
+    logger.warning(
+        "MAESTRO AUTOCORRECT done — files=%d, issues_after_rescue=%d",
+        len(files), len(rescued_issues),
+    )
+
+    return {
+        "candidate_files": files,
+        "review_issues": rescued_issues,
+        "autocorrected": True,
+    }
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -976,7 +1015,7 @@ def finalize_node(state: E2ECodegenState) -> E2ECodegenState:
         "house_style": state.get("house_style", {}),
         "review_issues": list(state.get("review_issues") or []),
         "repair_attempts": state.get("repair_attempts", 0),
-        "autocorrected": bool(state.get("_autocorrected")),  # type: ignore[typeddict-item]
+        "autocorrected": bool(state.get("autocorrected")),
         "pr_title": state.get("pr_title", _fallback_title(state["ticket"])),
         "pr_description": state.get("pr_description")
         or _fallback_description(state, state.get("candidate_files") or []),
@@ -1022,6 +1061,7 @@ def _build_graph():
     g.add_node("agent_generator", code_generator_agent)
     g.add_node("agent_reviewer", static_reviewer_agent)
     g.add_node("repair_prep", repair_prep_node)
+    g.add_node("agent_autocorrect", autocorrect_node)
     g.add_node("agent_narrator", pr_narrator_agent)
     g.add_node("finalize_ok", finalize_node)
 
@@ -1031,9 +1071,14 @@ def _build_graph():
     g.add_conditional_edges(
         "agent_reviewer",
         route_after_review,
-        {"repair": "repair_prep", "narrate": "agent_narrator"},
+        {
+            "repair":      "repair_prep",
+            "autocorrect": "agent_autocorrect",
+            "narrate":     "agent_narrator",
+        },
     )
     g.add_edge("repair_prep", "agent_generator")
+    g.add_edge("agent_autocorrect", "agent_narrator")
     g.add_edge("agent_narrator", "finalize_ok")
     g.add_edge("finalize_ok", END)
 

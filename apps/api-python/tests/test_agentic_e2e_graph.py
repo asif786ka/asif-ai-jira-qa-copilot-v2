@@ -243,6 +243,47 @@ def test_maestro_autocorrect_inserts_separator_and_prefixes_bare_commands():
                 pytest.fail(f"bare command remained: {line!r}")
 
 
+@pytest.mark.asyncio
+async def test_e2e_graph_autocorrect_rescue_fires_when_repairs_exhaust(monkeypatch):
+    """End-to-end: when the LLM keeps emitting bare commands past MAX_REPAIRS,
+    the autocorrect node MUST run and the final files MUST be well-formed.
+    """
+    bad_yaml = (
+        '{"files":[{"path":"tests/login.yaml","content":'
+        '"appId: com.example.app\\n\\nlaunchApp\\ntapOn: \\"Sign In\\"\\n"}]}'
+    )
+
+    # Script: scanner json + same broken file forever (4 attempts: 1 initial
+    # + MAX_REPAIRS=3 repairs) + narrator
+    _install_stub(monkeypatch, [
+        _scanner_json(),
+        bad_yaml,  # attempt 1
+        bad_yaml,  # repair 1
+        bad_yaml,  # repair 2
+        bad_yaml,  # repair 3
+        _narrator_json(),  # narrator after autocorrect
+    ])
+
+    result = await ag.run_e2e_codegen_pipeline(
+        _ticket(),
+        _cases(),
+        Platform.android,
+        "maestro",
+    )
+
+    assert result["ok"] is True, result
+    assert result["repair_attempts"] == ag.MAX_REPAIRS
+    assert result.get("autocorrected") is True, (
+        "autocorrect node should have fired after repair budget exhausted"
+    )
+    # The file's content after rescue must contain the --- separator and
+    # list-item-prefixed commands.
+    final = result["files"][0]["content"]
+    assert "---" in final
+    assert "- launchApp" in final
+    assert '- tapOn: "Sign In"' in final
+
+
 def test_maestro_autocorrect_noop_on_well_formed_yaml():
     clean = (
         "appId: com.example.app\n"
