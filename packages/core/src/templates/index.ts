@@ -205,11 +205,20 @@ function iosGithubActions(
     `          path: app-source`,
     `          token: \${{ secrets.GITHUB_TOKEN }}`,
     ``,
-    `      - uses: ruby/setup-ruby@v1`,
-    `        with:`,
-    `          ruby-version: "3.2"`,
-    `          bundler-cache: true`,
-    ``,
+    // ── Ruby + Fastlane only when we actually need them (XCUITest).
+    // Maestro is a single shell command; loading Fastlane just to wrap
+    // `maestro test` triggers Ruby gem-load issues (Fastlane 2.235 eagerly
+    // requires google-apis-playcustomapp → multi_json) that have nothing
+    // to do with the user's tests. Skip the whole Ruby chain for Maestro.
+    ...(isMaestro
+      ? []
+      : [
+          `      - uses: ruby/setup-ruby@v1`,
+          `        with:`,
+          `          ruby-version: "3.2"`,
+          `          bundler-cache: true`,
+          ``,
+        ]),
     ...(isMaestro
       ? [
           `      - name: Install Maestro`,
@@ -224,14 +233,26 @@ function iosGithubActions(
     `          xcrun simctl boot "iPhone 15" || true`,
     `          xcrun simctl bootstatus "iPhone 15" -b`,
     ``,
-    `      - name: Run e2e via Fastlane`,
-    `        id: e2e`,
-    `        run: bundle exec fastlane ios e2e`,
-    `        # SCHEME env var overrides the auto-guessed scheme name.`,
-    `        # Uncomment + edit if the default doesn't match your Xcode scheme:`,
-    `        # env:`,
-    `        #   SCHEME: ${schemeHint(c)}`,
-    ``,
+    ...(isMaestro
+      ? [
+          `      - name: Run Maestro flows`,
+          `        id: e2e`,
+          `        run: |`,
+          `          # Maestro reads each YAML in tests/ and runs it against the booted sim.`,
+          `          # Adjust the path if your flows live elsewhere.`,
+          `          maestro test tests/`,
+          ``,
+        ]
+      : [
+          `      - name: Run e2e via Fastlane`,
+          `        id: e2e`,
+          `        run: bundle exec fastlane ios e2e`,
+          `        # SCHEME env var overrides the auto-guessed scheme name.`,
+          `        # Uncomment + edit if the default doesn't match your Xcode scheme:`,
+          `        # env:`,
+          `        #   SCHEME: ${schemeHint(c)}`,
+          ``,
+        ]),
     // ── Proof artifacts — visible on the PR's "Checks" tab. Demoable in
     // an interview without needing to re-run the pipeline live.
     `      - name: Collect Maestro artifacts`,
@@ -312,9 +333,16 @@ function androidGithubActions(
     `      - uses: actions/setup-java@v4`,
     `        with: { distribution: temurin, java-version: "17" }`,
     ``,
-    `      - uses: ruby/setup-ruby@v1`,
-    `        with: { ruby-version: "3.2", bundler-cache: true }`,
-    ``,
+    // ── Ruby + Fastlane only when we actually need them. See iOS comment
+    // above — Maestro is a single shell command; loading Fastlane just to
+    // wrap it triggers Ruby gem-load issues (multi_json) for no upside.
+    ...(isMaestro
+      ? []
+      : [
+          `      - uses: ruby/setup-ruby@v1`,
+          `        with: { ruby-version: "3.2", bundler-cache: true }`,
+          ``,
+        ]),
     ...(isMaestro
       ? [
           `      - name: Install Maestro`,
@@ -334,7 +362,7 @@ function androidGithubActions(
     `        with:`,
     `          api-level: 34`,
     `          arch: x86_64`,
-    `          script: bundle exec fastlane android e2e`,
+    `          script: ${isMaestro ? `maestro test tests/` : `bundle exec fastlane android e2e`}`,
     ``,
     // ── Proof artifacts — visible on the PR's Checks tab.
     `      - name: Collect Maestro artifacts`,
