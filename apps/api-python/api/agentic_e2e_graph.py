@@ -306,11 +306,33 @@ Output STRICT JSON with this exact shape — nothing else, no prose, no markdown
   ]
 }
 
-Hard requirements per framework:
-- maestro    : YAML file, MUST start with `appId:` line, MUST include a `- launchApp` step.
-- xcuitest   : Swift, MUST `import XCTest`, MUST define a `class XYZ: XCTestCase`.
-- espresso   : Kotlin, MUST `import org.junit.Test`, every test method annotated with `@Test`.
-- playwright : TypeScript, MUST `import { test, expect } from '@playwright/test'`.
+Framework-specific hard requirements:
+
+## maestro
+- One flow per file. If the test plan has N test cases, produce N files.
+- File MUST be a YAML document with this shape exactly (no leading marker, no extra blank lines):
+
+  ```
+  appId: com.example.app
+  ---
+  - launchApp
+  - tapOn: "Sign In"
+  - assertVisible: "Welcome"
+  ```
+
+- Every command after `---` MUST be a YAML list item starting with `- `.
+- Commands NEVER appear bare (e.g. `launchApp` on its own line is INVALID — it must be `- launchApp`).
+- String values containing spaces / punctuation MUST be quoted.
+- `runScript:` arguments must reference an actual local helper file path, not a placeholder.
+
+## xcuitest
+- Swift, MUST `import XCTest`, MUST define a `class XYZ: XCTestCase`.
+
+## espresso
+- Kotlin, MUST `import org.junit.Test`, every test method annotated with `@Test`.
+
+## playwright
+- TypeScript, MUST `import { test, expect } from '@playwright/test'`.
 
 Always use the locator strategy from the house style. Prefer atomic steps —
 one user action per assertion. expected_result must contain a concrete assertion
@@ -468,7 +490,40 @@ def _lint_one(file: GeneratedFile, framework: str) -> list[ReviewIssue]:
                 "message": "Maestro flow must start with an 'appId:' line.",
                 "hint": "Add 'appId: com.example.app' at the top of the file.",
             })
-        if not re.search(r"-\s*launchApp\b", content):
+        # The `---` separator between the appId header and the flow steps is
+        # mandatory — without it, Maestro's YAML parser reads commands as
+        # appId-document fields and rejects them.
+        if not re.search(r"^---\s*$", content, flags=re.MULTILINE):
+            issues.append({
+                "file": path,
+                "code": "maestro_missing_separator",
+                "severity": "error",
+                "message": "Maestro flow must have a '---' line separating appId from the steps.",
+                "hint": "Add a line containing only '---' between the 'appId:' line and the first step.",
+            })
+        # Steps MUST be YAML list items. The LLM sometimes emits them bare
+        # (`launchApp` instead of `- launchApp`), which silently passes
+        # appId+launchApp regex but blows up at parse time.
+        bare_command_re = re.compile(
+            r"^(launchApp|tapOn|inputText|assertVisible|swipe|scroll|"
+            r"waitForAnimationToEnd|hideKeyboard|pressKey|takeScreenshot|"
+            r"copyTextFrom|runScript|extendedWaitUntil)\b",
+            flags=re.MULTILINE,
+        )
+        bare_hits = bare_command_re.findall(content)
+        if bare_hits:
+            sample = ", ".join(sorted(set(bare_hits))[:3])
+            issues.append({
+                "file": path,
+                "code": "maestro_steps_not_list_items",
+                "severity": "error",
+                "message": (
+                    f"Maestro steps must be YAML list items prefixed with '- '. "
+                    f"Found bare command(s): {sample}."
+                ),
+                "hint": "Rewrite each step as `- launchApp`, `- tapOn: \"X\"`, etc.",
+            })
+        if not re.search(r"^\s*-\s*launchApp\b", content, flags=re.MULTILINE):
             issues.append({
                 "file": path,
                 "code": "maestro_missing_launchapp",
@@ -593,7 +648,7 @@ async def _run_maestro_check(files: list[GeneratedFile]) -> list[ReviewIssue]:
 
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    "maestro", "check", disk_path,
+                    "maestro", "check-syntax", disk_path,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )

@@ -331,7 +331,7 @@ function iosGithubActions(
           `          # under a second; surfaces the exact line:col in CI logs.`,
           `          echo "::group::Preflight (maestro check)"`,
           `          for f in "\${FLOWS[@]}"; do`,
-          `            if ! maestro check "$f"; then`,
+          `            if ! maestro check-syntax "$f"; then`,
           `              echo "::error file=$f::Maestro 'check' rejected this flow — fix the YAML and regenerate the PR"`,
           `              exit 1`,
           `            fi`,
